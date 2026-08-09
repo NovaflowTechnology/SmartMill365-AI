@@ -1,0 +1,41 @@
+[
+  {
+    "chunk_id": "custom_rca_rule_custom_s2_high_peak",
+    "chunk_type": "rca_rule_joined",
+    "retrieval_scope": "primary_rca_rule",
+    "include_for_anomaly_retrieval": true,
+    "source": "custom",
+    "editable": true,
+    "source_file_name": "custom_rca_rules.json",
+    "rule_id": "CUSTOM_S2_HIGH_PEAK",
+    "priority": "P1",
+    "stage": "S2",
+    "attribution": "Boiler",
+    "pattern": "A+F",
+    "ml_label": "Boiler",
+    "rec_key": "CUSTOM_REC_S2_HIGH_PEAK",
+    "related_scoring_metrics": [
+      "MAE_s2_peak"
+    ],
+    "warn_threshold": "0.18 < MAE_s2_peak ≤ 0.25",
+    "critical_threshold": "MAE_s2_peak > 0.25",
+    "threshold_metric_name": "MAE_s2_peak",
+    "threshold_unit": "normalised 0-1",
+    "warn_low": 0.18,
+    "warn_high_critical_starts_here": 0.25,
+    "critical_value": 0.25,
+    "score_warn": -5,
+    "score_crit": -10,
+    "cap": 25,
+    "recommendation_en": "Check boiler, the steam supply.\nCheck load.",
+    "recommendation_bm": "",
+    "urgency": "High",
+    "target_metric": "MAE_s2_peak",
+    "created_at": "2026-07-22T22:38:21+08:00",
+    "updated_at": "2026-07-27T09:44:30+08:00",
+    "conflict_count_at_save": 2,
+    "conflict_acknowledged": true,
+    "text": "Rule ID: CUSTOM_S2_HIGH_PEAK\nSource: custom\nPriority: P1\nStage: S2\nAttribution group: Boiler\nPattern: A+F\nML label: Boiler\n\nInput signal(s):\nMAE_s2_peak\n\nExecutable formula:\nFLAG if MAE_s2_peak > threshold\n\nRule thresholds:\nWarning threshold: 0.18 < MAE_s2_peak ≤ 0.25\nCritical threshold: MAE_s2_peak > 0.25\nScore deduction when warning: -5\nScore deduction when critical: -10\nAttribution cap: 25\n\nRecommendation Matrix reference:\nRecommendation key: CUSTOM_REC_S2_HIGH_PEAK\nRoot cause: Boiler\nUrgency: High\nTarget metric: MAE_s2_peak\n\nRecommendation EN:\nCheck boiler, the steam supply.\nCheck load.",
+    "search_text": "RCA V4 Rule CUSTOM_S2_HIGH_PEAK\n\nSource custom\n\nStage S2\n\nAttribution Boiler\n\nPattern A+F\n\nRec key CUSTOM_REC_S2_HIGH_PEAK\n\nRelated scoring metrics: MAE_s2_peak\n\nRule ID: CUSTOM_S2_HIGH_PEAK\nSource: custom\nPriority: P1\nStage: S2\nAttribution group: Boiler\nPattern: A+F\nML label: Boiler\n\nInput signal(s):\nMAE_s2_peak\n\nExecutable formula:\nFLAG if MAE_s2_peak > threshold\n\nRule thresholds:\nWarning threshold: 0.18 < MAE_s2_peak ≤ 0.25\nCritical threshold: MAE_s2_peak > 0.25\nScore deduction when warning: -5\nScore deduction when critical: -10\nAttribution cap: 25\n\nRecommendation Matrix reference:\nRecommendation key: CUSTOM_REC_S2_HIGH_PEAK\nRoot cause: Boiler\nUrgency: High\nTarget metric: MAE_s2_peak\n\nRecommendation EN:\nCheck boiler, the steam supply.\nCheck load."
+  }
+]
