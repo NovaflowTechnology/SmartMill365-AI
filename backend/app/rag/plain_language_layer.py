@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -51,8 +52,8 @@ VALID_STAGES = {"S1", "S2", "S3", "CY", "EX"}
 # Plain terminology maps
 # -----------------------------------------------------------------------------
 STAGE_PLAIN = {
-    "S1": "first pressurisation phase",
-    "S2": "second pressurisation phase",
+    "S1": "first pressurization phase",
+    "S2": "second pressurization phase",
     "S3": "pressure holding phase",
     "CY": "overall cycle",
     "EX": "pressure release phase",
@@ -72,11 +73,12 @@ PATTERN_PLAIN = {
     "C": "the pressure fluctuated and was unstable",
     "D": "the pressure release between phases was abnormal",
     "E": "the holding pressure slowly dropped or could not stay stable",
-    "F": "more than one sterilizer showed similar pressure behaviour at the same time",
+    "F": "more than one sterilizer showed similar pressure behavior at the same time",
 }
 
 # These words should not appear in the visible operator layer.
 FORBIDDEN_TECHNICAL_PATTERNS = [
+    r"\bRCA\b",
     r"\bMAE\b",
     r"\bRMSE\b",
     r"\bthreshold\b",
@@ -251,23 +253,23 @@ def _clean_operator_sentence(value: Any) -> str:
         (r"\bcombined_error\b", "pressure difference"),
         (r"\bnormalisation\b|\bnormalization\b", "normal comparison"),
         (r"\bsub-window\b", "phase period"),
-        (r"\bStage\s*1\b|\bS1\b", "first pressurisation phase"),
-        (r"\bStage\s*2\b|\bS2\b", "second pressurisation phase"),
+        (r"\bStage\s*1\b|\bS1\b", "first pressurization phase"),
+        (r"\bStage\s*2\b|\bS2\b", "second pressurization phase"),
         (r"\bStage\s*3\b|\bS3\b", "pressure holding phase"),
-        (r"\bfirst peak\b", "pressure peak in the first pressurisation phase"),
-        (r"\bsecond peak\b", "pressure peak in the second pressurisation phase"),
+        (r"\bfirst peak\b", "pressure peak in the first pressurization phase"),
+        (r"\bsecond peak\b", "pressure peak in the second pressurization phase"),
         (r"\bthird peak\b", "pressure peak in the pressure holding phase"),
         (r"\bMAE_[A-Za-z0-9_]+\b", "pressure difference from normal"),
         (r"\bRMSE_[A-Za-z0-9_]+\b", "pressure instability"),
         (r"\bMAE\b", "pressure difference"),
         (r"\bRMSE\b", "pressure instability"),
-        (r"\bPattern\s*[A-F]\b", "pressure behaviour"),
-        (r"\b[A-F]\+[A-F](\+[A-F])*\b", "combined pressure behaviour"),
+        (r"\bPattern\s*[A-F]\b", "pressure behavior"),
+        (r"\b[A-F]\+[A-F](\+[A-F])*\b", "combined pressure behavior"),
         (r"\bP[1-5]\b", "cause group"),
         (r"\battribution\b", "likely cause"),
         (r"\brule\s*ID\b", "rule reference"),
         (r"\bS[123]-\d{3}\b|\bCY-\d{3}\b|\bEX-\d{3}\b", "rule reference"),
-        (r"\bdetected pattern\b", "pressure behaviour"),
+        (r"\bdetected pattern\b", "pressure behavior"),
         (r"\broot cause\b", "likely cause"),
     ]
 
@@ -468,6 +470,15 @@ def build_plain_language_rca_json(
         "evidence_available": evidence_info["available"],
         "evidence_reason": evidence_info["reason"],
         "evidence_summary_lines": evidence_info["summary_lines"],
+        "auxiliary_pressure_evidence": evidence.get("auxiliary_pressure_evidence") or {},
+        "competition_evidence": evidence.get("competition_evidence") or {},
+        "peer_pressure_conditions": (
+            (evidence.get("peer_sterilizer_evidence") or {}).get(
+                "affected_stage_pressure_conditions"
+            )
+            or (evidence.get("pressure_time_evidence") or {}).get("peer_window_stats")
+            or []
+        ),
         "recommended_action_source": action_source,
         "matched_rule_count": len(matched_rules or []),
     }
@@ -480,9 +491,108 @@ def _peer_phrase(rca_json: Dict[str, Any]) -> str:
     names = rca_json.get("peer_names") or []
     if count <= 0:
         return ""
+    noun = "sterilizer" if count == 1 else "sterilizers"
     if names:
-        return f"{_count_word(count).capitalize()} other sterilizer(s) ({_join_names(names)})"
-    return f"{_count_word(count).capitalize()} other sterilizer(s)"
+        return f"{_count_word(count).capitalize()} other {noun} ({_join_names(names)})"
+    return f"{_count_word(count).capitalize()} other {noun}"
+
+
+def _auxiliary_pressure_observation(rca_json: Dict[str, Any]) -> str:
+    """Return actual readings for only the equipment matching the chosen cause."""
+    root = str(rca_json.get("root_cause") or "").upper()
+    cause_key = {"BOILER": "boiler", "BPV": "bpv"}.get(root)
+    if not cause_key:
+        return ""
+
+    item = (rca_json.get("auxiliary_pressure_evidence") or {}).get(cause_key) or {}
+    stats = item.get("stage_window_stats") or {}
+    if not item:
+        return f" No {root} pressure channel is configured for the selected tag, so its actual pressure could not be included."
+    if not item.get("available") or not stats.get("available"):
+        reason = item.get("reason") or stats.get("reason") or "no readings were returned"
+        return (
+            f" {item.get('display_name') or root} pressure on {item.get('field') or 'the configured channel'} "
+            f"was unavailable for this affected-stage period because {reason}."
+        )
+
+    unit = stats.get("source_unit") or stats.get("benchmark_unit") or "pressure units"
+    minimum = stats.get("raw_min_pressure", stats.get("min_pressure"))
+    mean = stats.get("raw_mean_pressure", stats.get("mean_pressure"))
+    maximum = stats.get("raw_max_pressure", stats.get("max_pressure"))
+    start = stats.get("raw_start_pressure", stats.get("start_pressure"))
+    end = stats.get("raw_end_pressure", stats.get("end_pressure"))
+    name = item.get("display_name") or root
+    field = item.get("field") or "configured channel"
+    condition = item.get("pressure_condition") or "pressure condition available from the recorded values"
+
+    return (
+        f" The recorded {name} pressure on {field} was {condition}. From {_plain_timestamp(stats.get('window_start'))} to "
+        f"{_plain_timestamp(stats.get('window_end'))}, its pressure ranged from {minimum} to {maximum} {unit}, with mean {mean} {unit}, "
+        f"starting at {start} {unit} and ending at {end} {unit}."
+    )
+
+
+def _plain_timestamp(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "the unavailable time"
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d %H:%M:%S %z")
+    except Exception:
+        return text
+
+
+def _peer_pressure_observation(rca_json: Dict[str, Any], max_peers: int = 4) -> str:
+    """Explain the actual pressure condition of relevant peer sterilizers."""
+    items = rca_json.get("peer_pressure_conditions") or []
+    details: List[str] = []
+
+    for item in items:
+        if not isinstance(item, dict) or not item.get("available"):
+            continue
+        unit = item.get("source_unit") or item.get("benchmark_unit") or "pressure units"
+        minimum = item.get("min_pressure", item.get("raw_min_pressure"))
+        mean = item.get("mean_pressure", item.get("raw_mean_pressure"))
+        maximum = item.get("max_pressure", item.get("raw_max_pressure"))
+        start = item.get("start_pressure", item.get("raw_start_pressure"))
+        end = item.get("end_pressure", item.get("raw_end_pressure"))
+        condition = item.get("pressure_condition") or "active during the affected stage"
+        details.append(
+            f"{item.get('sterilizer_name') or item.get('field')} was {condition}; "
+            f"minimum {minimum} {unit}, mean {mean} {unit}, maximum {maximum} {unit}, "
+            f"starting at {start} {unit} and ending at {end} {unit}"
+        )
+        if len(details) >= max_peers:
+            break
+
+    if not details:
+        return " Individual peer pressure readings for the affected-stage period were unavailable."
+
+    first = next(
+        (item for item in items if isinstance(item, dict) and item.get("available")),
+        {},
+    )
+    return (
+        f" During the affected-stage window from {_plain_timestamp(first.get('window_start'))} "
+        f"to {_plain_timestamp(first.get('window_end'))}, peer pressure conditions were: "
+        + "; ".join(details)
+        + "."
+    )
+
+
+def _competition_ramp_observation(rca_json: Dict[str, Any], max_peers: int = 3) -> str:
+    events = (rca_json.get("competition_evidence") or {}).get("concurrent_ramp_peers") or []
+    details: List[str] = []
+    for event in events[:max_peers]:
+        details.append(
+            f"{event.get('sterilizer_name') or event.get('field')} started a pressure ramp at "
+            f"{_plain_timestamp(event.get('ramp_start_time'))}, at "
+            f"{event.get('ramp_start_pressure')} {event.get('pressure_unit') or 'pressure units'}"
+        )
+    if not details:
+        return " No peer pressure-ramp start was detected inside the affected-stage window."
+    return " Concurrent ramp evidence: " + "; ".join(details) + "."
 
 
 def _build_what_happened(rca_json: Dict[str, Any]) -> str:
@@ -493,47 +603,61 @@ def _build_what_happened(rca_json: Dict[str, Any]) -> str:
 
     if root == "BOILER":
         if peer:
-            return (
-                f"During the {stage}, the pressure behaviour was affected while {peer.lower()} "
+            text = (
+                f"During the {stage}, the pressure behavior was affected while {peer.lower()} "
                 "were also active, increasing total steam demand. This indicates a shared steam supply issue among the sterilizers."
             )
+        else:
+            text = (
+                f"During the {stage}, the pressure did not build up as strongly as expected. "
+                "This indicates that the sterilizer may not have received enough steam during this part of the cycle."
+            )
         return (
-            f"During the {stage}, the pressure did not build up as strongly as expected. "
-            "This indicates that the sterilizer may not have received enough steam during this part of the cycle."
+            text
+            + _auxiliary_pressure_observation(rca_json)
+            + _peer_pressure_observation(rca_json)
         )
 
     if root == "COMPETITION":
         if peer:
-            return (
+            text = (
                 f"During the {stage}, this sterilizer needed steam while {peer.lower()} were also active. "
                 "This indicates that steam demand may have overlapped between sterilizers."
             )
-        return f"During the {stage}, the pressure behaviour suggests possible overlap with another sterilizer demanding steam."
+        else:
+            text = f"During the {stage}, the pressure behavior suggests possible overlap with another sterilizer demanding steam."
+        return (
+            text
+            + _competition_ramp_observation(rca_json)
+            + _peer_pressure_observation(rca_json)
+        )
 
     if root == "BPV":
         return (
             f"During the {stage}, the pressure did not follow the expected operating profile. "
             "This suggests the steam delivery or pressure control response may not be stable."
-        )
+        ) + _auxiliary_pressure_observation(rca_json) + _peer_pressure_observation(rca_json)
 
     if root == "NETWORK":
         if peer:
-            return (
-                f"During the {stage}, more than one sterilizer showed pressure behaviour that needs attention. "
+            text = (
+                f"During the {stage}, more than one sterilizer showed pressure behavior that needs attention. "
                 f"{peer} were active, so the shared steam line may be affecting steam distribution."
             )
-        return f"During the {stage}, the pressure behaviour suggests uneven steam distribution in the shared steam line."
+        else:
+            text = f"During the {stage}, the pressure behavior suggests uneven steam distribution in the shared steam line."
+        return text + _peer_pressure_observation(rca_json)
 
     if root == "LOCAL":
         return (
-            f"During the {stage}, this sterilizer showed abnormal pressure behaviour while the issue appears local to this unit. "
+            f"During the {stage}, this sterilizer showed abnormal pressure behavior while the issue appears local to this unit. "
             "The affected part should be checked before the same problem repeats."
         )
 
     if patterns:
         return f"During the {stage}, {patterns[0]}. The cycle should be checked before the next operation."
 
-    return f"During the {stage}, the pressure behaviour needs attention and should be checked before the next cycle."
+    return f"During the {stage}, the pressure behavior needs attention and should be checked before the next cycle."
 
 
 def _build_most_likely_cause(rca_json: Dict[str, Any]) -> str:
@@ -659,11 +783,11 @@ def _split_compound_kb_action(sentence: str, rca_json: Dict[str, Any]) -> List[s
     stage = rca_json.get("focus_stage_plain") or "selected phase"
     clean = re.sub(r"(?i)\bduring the second ramp\b", f"during the {stage}", clean)
     clean = re.sub(r"(?i)\bduring second ramp\b", f"during the {stage}", clean)
-    clean = re.sub(r"(?i)\bduring S1 window\b", "during the first pressurisation phase", clean)
-    clean = re.sub(r"(?i)\bduring S2 window\b", "during the second pressurisation phase", clean)
+    clean = re.sub(r"(?i)\bduring S1 window\b", "during the first pressurization phase", clean)
+    clean = re.sub(r"(?i)\bduring S2 window\b", "during the second pressurization phase", clean)
     clean = re.sub(r"(?i)\bduring S3 window\b", "during the pressure holding phase", clean)
-    clean = re.sub(r"(?i)\bduring first pressurisation phase window\b", "during the first pressurisation phase", clean)
-    clean = re.sub(r"(?i)\bduring second pressurisation phase window\b", "during the second pressurisation phase", clean)
+    clean = re.sub(r"(?i)\bduring first pressurization phase window\b", "during the first pressurization phase", clean)
+    clean = re.sub(r"(?i)\bduring second pressurization phase window\b", "during the second pressurization phase", clean)
     clean = re.sub(r"(?i)\bduring pressure holding phase window\b", "during the pressure holding phase", clean)
 
     # Split only simple "Check A and B" structures into separate action points.
@@ -712,7 +836,7 @@ def _build_action_items(rca_json: Dict[str, Any]) -> List[str]:
         return actions
 
     # Transparent fallback when the matched RCA rule has no recommendation text.
-    return ["No knowledge-base recommendation was returned for this RCA rule."]
+    return ["No knowledge-base recommendation was returned for this analysis rule."]
 
 def _build_priority(rca_json: Dict[str, Any]) -> str:
     return _normalise_priority_text(
@@ -778,7 +902,7 @@ def build_template_plain_language_feedback(rca_json: Dict[str, Any]) -> Dict[str
             "attempted": False,
             "success": False,
             "fallback_used": True,
-            "reason": "Template generated from RCA facts.",
+            "reason": "Template generated from analysis facts.",
         },
         rca_json=rca_json,
     )
@@ -788,7 +912,7 @@ def build_template_plain_language_feedback(rca_json: Dict[str, Any]) -> Dict[str
 # -----------------------------------------------------------------------------
 def _build_llm_system_prompt() -> str:
     return """
-You are a senior palm oil mill engineer explaining sterilizer RCA feedback to an operator.
+You are a senior palm oil mill engineer explaining sterilizer analysis feedback to an operator.
 Use simple operator language. Do not expose calculations, rule codes, or model details.
 Return the answer using exactly these headings:
 
@@ -803,7 +927,7 @@ Rules:
 - Do not add actions that are not stated or directly implied by the knowledge-base recommendation.
 - If other sterilizers are active, mention them in Most likely cause.
 - Do not use: MAE, RMSE, threshold, rule ID, Pattern A, benchmark, deviation, metric value, P1, P2, P3, S1, S2, S3.
-- Use phase names such as first pressurisation phase, second pressurisation phase, pressure holding phase.
+- Use phase names such as first pressurization phase, second pressurization phase, pressure holding phase.
 - Priority must be one phrase only: Act immediately, Act as soon as possible, Verify first, or Schedule for next maintenance.
 """.strip()
 
@@ -1123,7 +1247,10 @@ def _build_evidence_used(rca_json: Dict[str, Any]) -> List[str]:
     if shared > 0:
         items.append(f"{shared} peer sterilizer(s) also showed notable pressure movement.")
     if not items:
-        items.append("RCA rule result and selected cycle pressure behaviour were used.")
+        items.append("The analysis rule result and selected cycle pressure behavior were used.")
+    auxiliary = _auxiliary_pressure_observation(rca_json).strip()
+    if auxiliary:
+        items.append(auxiliary)
     return items
 
 
@@ -1131,7 +1258,7 @@ def _build_knowledge_basis(rca_json: Dict[str, Any]) -> List[str]:
     source = _clean_text(rca_json.get("recommended_action_source"))
     rule_text = []
     if rca_json.get("root_cause"):
-        rule_text.append(f"Matched RCA rule root cause: {rca_json.get('root_cause')}")
+        rule_text.append(f"Matched analysis rule cause: {rca_json.get('root_cause')}")
     if rca_json.get("focus_stage_plain"):
         rule_text.append(f"Affected phase: {rca_json.get('focus_stage_plain')}")
     if source:

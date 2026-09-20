@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import "../RcaFeedbackPanel.css";
+import { formatPlantDateTime } from "../utils/plantTime";
 
 function formatNumber(value, digits = 3) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -28,7 +29,16 @@ function toTitleCase(value) {
 }
 
 function getFeedbackPayload(rcaFeedback) {
-  return rcaFeedback?.feedback || rcaFeedback || null;
+  if (!rcaFeedback) return null;
+  if (!rcaFeedback.feedback) return rcaFeedback;
+
+  // The analysis endpoint returns evidence_context beside feedback. Preserve
+  // it when unwrapping the response so Boiler and peer readings reach the UI.
+  return {
+    ...rcaFeedback.feedback,
+    evidence_context:
+      rcaFeedback.feedback?.evidence_context || rcaFeedback.evidence_context || {},
+  };
 }
 
 function getSeverityClass(value) {
@@ -110,6 +120,8 @@ function makeOperatorSafeText(value) {
   if (!text) return "";
 
   const replacements = [
+    [/\bRCA\b/gi, "analysis"],
+    [/\bBOILER\b/g, "Boiler"],
     [/\bbenchmark\b/gi, "normal operating profile"],
     [/\bdeviation\b/gi, "pressure difference from normal"],
     [/\bmeasured difference\b/gi, "pressure difference from normal"],
@@ -130,8 +142,8 @@ function makeOperatorSafeText(value) {
     [/\bRMSE_[A-Za-z0-9_]+\b/g, "pressure instability"],
     [/\bMAE\b/g, "pressure difference"],
     [/\bRMSE\b/g, "pressure instability"],
-    [/\bPattern\s*[A-F]\b/gi, "pressure behaviour"],
-    [/\b[A-F]\+[A-F](\+[A-F])*\b/g, "combined pressure behaviour"],
+    [/\bPattern\s*[A-F]\b/gi, "pressure behavior"],
+    [/\b[A-F]\+[A-F](\+[A-F])*\b/g, "combined pressure behavior"],
     [/\bP[1-5]\b/g, "cause group"],
     [/\battribution\b/gi, "likely cause"],
     [/\brule\s*ID\b/gi, "rule reference"],
@@ -453,6 +465,30 @@ function formatPeerNames(names) {
   return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
 }
 
+function formatEvidenceTime(value) {
+  if (!value) return "time unavailable";
+  return formatPlantDateTime(value, {
+    month: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+}
+
+function formatEvidenceNumber(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "-";
+}
+
+function formatEquipmentName(value, fallback = "Equipment") {
+  const text = String(value || fallback).trim();
+  const upper = text.toUpperCase();
+
+  if (upper === "BOILER") return "Boiler";
+  if (upper === "BPV") return "BPV";
+  if (upper === "NETWORK") return "Steam network";
+  return text;
+}
+
 function peerEvidenceSentence(feedback, humanFeedback) {
   const { names, activeCount, sharedCount } = getPeerEvidenceInfo(feedback, humanFeedback);
   const count = Math.max(activeCount, sharedCount, names.length);
@@ -466,6 +502,90 @@ function peerEvidenceSentence(feedback, humanFeedback) {
   }
 
   return "The evidence should be reviewed together with the pressure chart and equipment condition.";
+}
+
+function conditionalPressureEvidenceSentence(feedback, humanFeedback) {
+  const rootCause = getRootCause(feedback, humanFeedback);
+  const evidence = getEvidenceContext(feedback, humanFeedback);
+
+  if (["BOILER", "BPV"].includes(rootCause)) {
+    const key = rootCause.toLowerCase();
+    const causeName = formatEquipmentName(rootCause);
+    const item = evidence?.auxiliary_pressure_evidence?.[key] || {};
+    const stats = item?.stage_window_stats || {};
+    if (!item || Object.keys(item).length === 0) {
+      return `${causeName} pressure data could not be included because no ${causeName} pressure channel is configured for the selected tag.`;
+    }
+    if (!item?.available || !stats?.available) {
+      const unavailableReason = String(
+        item.reason || stats.reason || "no readings were returned"
+      ).replace(/\bBOILER\b/g, "Boiler");
+      return `${formatEquipmentName(item.display_name, causeName)} pressure on ${item.field || "the configured channel"} was unavailable for the affected-stage period because ${unavailableReason}.`;
+    }
+
+    const unit = stats.source_unit || stats.benchmark_unit || "pressure units";
+    const minimum = stats.raw_min_pressure ?? stats.min_pressure;
+    const mean = stats.raw_mean_pressure ?? stats.mean_pressure;
+    const maximum = stats.raw_max_pressure ?? stats.max_pressure;
+    const start = stats.raw_start_pressure ?? stats.start_pressure;
+    const end = stats.raw_end_pressure ?? stats.end_pressure;
+    const name = formatEquipmentName(item.display_name, causeName);
+    const condition =
+      item.pressure_condition || "recorded during the affected stage";
+
+    return `The recorded ${name} pressure on ${item.field || "the configured channel"} was ${condition}. From ${formatEvidenceTime(stats.window_start)} to ${formatEvidenceTime(stats.window_end)}, it had a minimum of ${formatEvidenceNumber(minimum)} ${unit}, mean of ${formatEvidenceNumber(mean)} ${unit}, and maximum of ${formatEvidenceNumber(maximum)} ${unit}; it started at ${formatEvidenceNumber(start)} ${unit} and ended at ${formatEvidenceNumber(end)} ${unit}.`;
+  }
+
+  if (rootCause === "COMPETITION") {
+    const ramps = evidence?.competition_evidence?.concurrent_ramp_peers || [];
+    if (!Array.isArray(ramps) || ramps.length === 0) return "";
+    const event = ramps[0] || {};
+    return `${event.sterilizer_name || "A peer sterilizer"} began a pressure ramp at ${event.ramp_start_time || "the affected period"}, at ${event.ramp_start_pressure ?? "-"} ${event.pressure_unit || "pressure units"}.`;
+  }
+
+  return "";
+}
+
+function getPeerPressureEvidence(feedback, humanFeedback) {
+  const evidence = getEvidenceContext(feedback, humanFeedback);
+  const compactConditions =
+    evidence?.peer_sterilizer_evidence?.affected_stage_pressure_conditions || [];
+  const legacyConditions = evidence?.pressure_time_evidence?.peer_window_stats || [];
+  const conditions = (compactConditions.length ? compactConditions : legacyConditions)
+    .filter((item) => item?.available)
+    .slice(0, 4);
+
+  if (!conditions.length) {
+    return {
+      available: false,
+      message:
+        "Individual competitor sterilizer pressure readings were unavailable for the affected-stage time range.",
+      rows: [],
+    };
+  }
+
+  const first = conditions[0];
+  const rows = conditions.map((item) => {
+    const unit = item.source_unit || item.benchmark_unit || "pressure units";
+    return {
+      name: item.sterilizer_name || item.display_name || item.field || "Peer sterilizer",
+      condition:
+        item.pressure_condition || "active during part of the affected stage",
+      unit,
+      minimum: item.min_pressure ?? item.raw_min_pressure,
+      mean: item.mean_pressure ?? item.raw_mean_pressure,
+      maximum: item.max_pressure ?? item.raw_max_pressure,
+      start: item.start_pressure ?? item.raw_start_pressure,
+      end: item.end_pressure ?? item.raw_end_pressure,
+    };
+  });
+
+  return {
+    available: true,
+    windowStart: formatEvidenceTime(first.window_start),
+    windowEnd: formatEvidenceTime(first.window_end),
+    rows,
+  };
 }
 
 function rootCauseSentence(rootCause) {
@@ -513,20 +633,43 @@ function buildPreferredWhatHappened(feedback, humanFeedback) {
   const peerSentence = peerEvidenceSentence(feedback, humanFeedback);
 
   return joinSentenceParts([
-    `During the ${stage}, the pressure behaviour did not follow the expected operating profile for a stable cycle.`,
+    `During the ${stage}, the pressure behavior did not follow the expected operating profile for a stable cycle.`,
     rootCauseSentence(rootCause),
     peerSentence,
+    conditionalPressureEvidenceSentence(feedback, humanFeedback),
     sharedConclusionSentence(rootCause, feedback, humanFeedback),
   ]);
 }
 
 function getKnowledgeBaseRecommendationText(feedback, humanFeedback, existingActions = []) {
+  // human_feedback.recommended_actions is the backend's final, status-aware
+  // action list.  Do not let an older/empty primary-rule payload or generic
+  // next_actions value mask it.  Combine all usable sources and deduplicate so
+  // a valid S2-005 recommendation still reaches the action extractor.
+  const candidates = [
+    ...normaliseList(humanFeedback?.recommended_actions),
+    ...normaliseList(existingActions),
+    feedback?.primary_rule?.recommendation_en,
+    feedback?.recommendation,
+    ...normaliseList(feedback?.next_actions),
+  ]
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+
+  const unique = [];
+  candidates.forEach((item) => {
+    if (unique.some((existing) => existing.toLowerCase() === item.toLowerCase())) return;
+    unique.push(item);
+  });
+
+  return unique.join(" ").trim();
+}
+
+function getMalayRecommendationText(feedback, humanFeedback) {
   return String(
-    feedback?.primary_rule?.recommendation_en ||
-      feedback?.recommendation ||
-      normaliseList(feedback?.next_actions).join(" ") ||
-      normaliseList(humanFeedback?.recommended_actions).join(" ") ||
-      normaliseList(existingActions).join(" ") ||
+    feedback?.primary_rule?.recommendation_bm ||
+      feedback?.recommendation_bm ||
+      humanFeedback?.recommendation_bm ||
       ""
   ).trim();
 }
@@ -632,7 +775,56 @@ function buildPreferredActions(feedback, humanFeedback, existingActions = []) {
     return kbActions;
   }
 
-  return ["No knowledge-base recommendation was returned for this RCA rule."];
+  return ["No knowledge-base recommendation was returned for this analysis rule."];
+}
+
+function cleanMalayActionLine(value) {
+  let text = String(value || "")
+    .replace(/^[-•]\s*/g, "")
+    .replace(/^\d+[.)]\s*/g, "")
+    .replace(/^tindakan\s*:\s*/i, "")
+    .replace(/\bRCA\b/gi, "analisis")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!text) return "";
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
+function isMalayActionClause(value) {
+  return /\b(periksa|semak|pantau|sahkan|pastikan|uji|laras|laraskan|selaras|selaraskan|tingkatkan|kurangkan|kalibrasi|tentukur|jadualkan|elakkan|hadkan|bandingkan|bersihkan|salirkan|gantikan|ganti|baiki|selenggara|laksanakan|perbetulkan)\b/i.test(
+    String(value || "")
+  );
+}
+
+function buildMalayActions(feedback, humanFeedback) {
+  const source = getMalayRecommendationText(feedback, humanFeedback);
+  if (!source) {
+    return ["Cadangan Bahasa Melayu tidak tersedia untuk peraturan analisis ini."];
+  }
+
+  const sentences = splitKnowledgeBaseRecommendationSentences(source)
+    .map((sentence) => cleanMalayActionLine(sentence))
+    .filter(Boolean);
+  const actionSentences = sentences.filter((sentence) => isMalayActionClause(sentence));
+  const preferred = actionSentences.length > 0 ? actionSentences : sentences;
+
+  return uniqueList(preferred).slice(0, 4);
+}
+
+function translatePriorityToMalay(priority) {
+  const text = String(priority || "").trim().toLowerCase();
+
+  if (text.includes("verify immediately")) {
+    return "Sahkan dengan segera; ambil tindakan hanya selepas disahkan";
+  }
+  if (text.includes("verify first")) {
+    return "Sahkan dahulu; kemudian ambil tindakan jika disahkan";
+  }
+  if (text.includes("act immediately")) return "Ambil tindakan segera";
+  if (text.includes("inspect soon")) return "Periksa secepat mungkin";
+  if (text.includes("maintenance")) return "Jadualkan untuk penyelenggaraan seterusnya";
+  return "Semakan diperlukan";
 }
 
 function buildPriorityText(feedback, humanFeedback, plainPriority) {
@@ -640,15 +832,21 @@ function buildPriorityText(feedback, humanFeedback, plainPriority) {
   const severity = getSeverity(feedback, humanFeedback);
   const existing = makeOperatorSafeText(normaliseList(plainPriority).join(" "));
 
+  // Candidate describes confidence in the cause, while critical describes the
+  // size of the deviation.  A critical candidate needs urgent verification,
+  // not an unverified corrective action.
+  if (status === "candidate" && severity === "critical") {
+    return "Verify immediately; act only if confirmed";
+  }
+  if (status === "candidate") return "Verify first, then act if confirmed";
   if (status === "confirmed" && severity === "critical") return "Act immediately";
   if (severity === "critical") return "Act immediately";
-  if (status === "candidate") return "Verify first, then act if confirmed";
   if (severity === "warning") return "Inspect soon";
 
   return existing || "Review required";
 }
 
-function buildTwoSectionContent(feedback, humanFeedback) {
+function buildTwoSectionContent(feedback, humanFeedback, actionLanguage = "en") {
   const plainLanguage = getPlainLanguagePayload(feedback, humanFeedback);
 
   const whatHappened = getPlainField(
@@ -686,8 +884,13 @@ function buildTwoSectionContent(feedback, humanFeedback) {
     ])
   );
 
-  const useGeneratedWhatHappened = isWeakText(combinedPlainText) || combinedPlainText.length > 650;
-  const finalWhatHappened = useGeneratedWhatHappened
+  const rootCause = getRootCause(feedback, humanFeedback);
+  const evidenceRichCause = ["BOILER", "BPV", "COMPETITION", "NETWORK"].includes(
+    rootCause
+  );
+  const useGeneratedWhatHappened =
+    evidenceRichCause || isWeakText(combinedPlainText) || combinedPlainText.length > 650;
+  let finalWhatHappened = useGeneratedWhatHappened
     ? buildPreferredWhatHappened(feedback, humanFeedback)
     : combinedPlainText;
 
@@ -700,10 +903,22 @@ function buildTwoSectionContent(feedback, humanFeedback) {
     ? buildPreferredActions(feedback, humanFeedback, rawActions)
     : buildPreferredActions(feedback, humanFeedback, rawActions);
 
+  const finalPriority = buildPriorityText(feedback, humanFeedback, priority);
+  const peerPressureEvidence = evidenceRichCause
+    ? getPeerPressureEvidence(feedback, humanFeedback)
+    : null;
+
   return {
     whatHappened: finalWhatHappened,
-    actions: finalActions,
-    priority: buildPriorityText(feedback, humanFeedback, priority),
+    peerPressureEvidence,
+    actions:
+      actionLanguage === "bm"
+        ? buildMalayActions(feedback, humanFeedback)
+        : finalActions,
+    priority:
+      actionLanguage === "bm"
+        ? translatePriorityToMalay(finalPriority)
+        : finalPriority,
   };
 }
 
@@ -711,20 +926,33 @@ function Badge({ children, className = "" }) {
   return <span className={`rca-pill ${className}`}>{children}</span>;
 }
 
-function OperatorSection({ title, children, className = "" }) {
+function OperatorSection({ title, headerAction = null, children, className = "" }) {
   return (
     <section className={`rca-operator-box ${className}`}>
-      <h4>{title}</h4>
+      <div className="rca-operator-box-header">
+        <h4>{title}</h4>
+        {headerAction}
+      </div>
       <div className="rca-operator-box-content">{children}</div>
     </section>
   );
 }
 
 function OperatorPlainOutput({ feedback, humanFeedback }) {
+  const [actionLanguage, setActionLanguage] = useState("en");
   const plainLanguage = getPlainLanguagePayload(feedback, humanFeedback);
   const llmGeneration = getLlmGeneration(humanFeedback);
   const sourceLabel = getPlainSourceLabel(llmGeneration, plainLanguage);
-  const content = buildTwoSectionContent(feedback, humanFeedback);
+  const hasMalayRecommendation = Boolean(
+    getMalayRecommendationText(feedback, humanFeedback)
+  );
+
+  const effectiveActionLanguage = hasMalayRecommendation ? actionLanguage : "en";
+  const content = buildTwoSectionContent(
+    feedback,
+    humanFeedback,
+    effectiveActionLanguage
+  );
 
   return (
     <div className="rca-operator-block">
@@ -740,11 +968,50 @@ function OperatorPlainOutput({ feedback, humanFeedback }) {
       <div className="rca-two-section-grid">
         <OperatorSection title="What happened" className="rca-what-happened-box">
           <p>{content.whatHappened}</p>
+
+          {content.peerPressureEvidence && (
+            <PeerPressureEvidence evidence={content.peerPressureEvidence} />
+          )}
         </OperatorSection>
 
-        <OperatorSection title="What to do" className="rca-what-to-do-box">
+        <OperatorSection
+          title="What to do"
+          className="rca-what-to-do-box"
+          headerAction={
+            <div
+              className="rca-language-switch"
+              role="group"
+              aria-label="Select action language"
+            >
+              <button
+                type="button"
+                className={actionLanguage === "en" ? "active" : ""}
+                onClick={() => setActionLanguage("en")}
+                aria-pressed={actionLanguage === "en"}
+              >
+                English
+              </button>
+              <button
+                type="button"
+                className={actionLanguage === "bm" ? "active" : ""}
+                onClick={() => setActionLanguage("bm")}
+                aria-pressed={actionLanguage === "bm"}
+                disabled={!hasMalayRecommendation}
+                title={
+                  hasMalayRecommendation
+                    ? "Show the Malay knowledge-base recommendation"
+                    : "This older rule has no Malay recommendation"
+                }
+              >
+                Bahasa Melayu
+              </button>
+            </div>
+          }
+        >
+
           <div className="rca-priority-inline">
-            <strong>Priority:</strong> {content.priority}
+            <strong>{actionLanguage === "bm" ? "Keutamaan:" : "Priority:"}</strong>{" "}
+            {content.priority}
           </div>
 
           <ul className="rca-action-list">
@@ -753,6 +1020,56 @@ function OperatorPlainOutput({ feedback, humanFeedback }) {
             ))}
           </ul>
         </OperatorSection>
+      </div>
+    </div>
+  );
+}
+
+function PeerPressureEvidence({ evidence }) {
+  if (!evidence?.available) {
+    return (
+      <div className="rca-peer-pressure-unavailable">
+        {evidence?.message || "Competitor sterilizer pressure data is unavailable."}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rca-peer-pressure-block">
+      <div className="rca-peer-pressure-title">
+        Competitor sterilizer pressure
+      </div>
+      <div className="rca-peer-pressure-window">
+        <strong>Affected-stage period:</strong> {evidence.windowStart} to{" "}
+        {evidence.windowEnd}
+      </div>
+
+      <div className="rca-peer-pressure-rows">
+        {evidence.rows.map((row, index) => (
+          <div className="rca-peer-pressure-row" key={`${row.name}-${index}`}>
+            <div className="rca-peer-pressure-row-heading">
+              <strong>{row.name}</strong>
+              <span>{row.condition}</span>
+            </div>
+
+            <div className="rca-peer-pressure-metrics">
+              {[
+                ["Minimum", row.minimum],
+                ["Mean", row.mean],
+                ["Maximum", row.maximum],
+                ["Start", row.start],
+                ["End", row.end],
+              ].map(([label, value]) => (
+                <div key={label} className="rca-peer-pressure-metric">
+                  <span>{label}</span>
+                  <strong>
+                    {formatEvidenceNumber(value)} {row.unit}
+                  </strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -848,7 +1165,7 @@ function OtherMatchedRules({ matchedRules }) {
 
   return (
     <div className="rca-section">
-      <h4>Other Matched RCA Rules</h4>
+      <h4>Other Matched Analysis Rules</h4>
 
       <div className="rca-table-wrap">
         <table className="rca-table">
@@ -901,16 +1218,17 @@ function Notes({ notes }) {
 function AugmentedContext({ augmentedContext }) {
   if (!augmentedContext) return null;
 
-  const contextText =
+  const rawContextText =
     typeof augmentedContext === "string"
       ? augmentedContext
       : JSON.stringify(augmentedContext, null, 2);
+  const contextText = rawContextText.replace(/\bRCA\b/gi, "Analysis");
 
   if (!contextText || contextText === "{}") return null;
 
   return (
     <div className="rca-section">
-      <h4>Retrieved RCA Context</h4>
+      <h4>Retrieved Analysis Context</h4>
       <pre className="rca-context-pre">{contextText}</pre>
     </div>
   );
@@ -923,7 +1241,7 @@ export default function RcaFeedbackPanel({ rcaFeedback }) {
   if (!rcaFeedback) {
     return (
       <div className="rca-card rca-empty">
-        <p>Click Generate RCA to retrieve rules and produce feedback.</p>
+        <p>Click Generate Analysis to retrieve rules and produce feedback.</p>
       </div>
     );
   }
@@ -933,7 +1251,7 @@ export default function RcaFeedbackPanel({ rcaFeedback }) {
   if (!feedback) {
     return (
       <div className="rca-card rca-empty">
-        <p>No RCA feedback payload was returned.</p>
+        <p>No analysis feedback payload was returned.</p>
       </div>
     );
   }
@@ -964,7 +1282,7 @@ export default function RcaFeedbackPanel({ rcaFeedback }) {
       <div className="rca-top-row">
         <div className="rca-badge-group">
           <Badge className={`rca-pill-${getSeverityClass(status)}`}>
-            RCA: {toTitleCase(status)}
+            Analysis: {toTitleCase(status)}
           </Badge>
 
           <Badge className={`rca-pill-${getSeverityClass(severity)}`}>

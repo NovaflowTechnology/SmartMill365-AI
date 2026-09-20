@@ -1,12 +1,24 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
+import { useNavigate } from "react-router-dom";
 import api from "../api";
+import { useAuth } from "../auth/AuthContext";
 import QueryForm from "../components/QueryForm";
 import TopNav from "../components/TopNav";
 import ContinuousComparisonChart from "../components/ContinuousComparisonChart";
 import RcaFeedbackPanel from "../components/RcaFeedbackPanel";
 import { getSterilizerDisplayName } from "../utils/sterilizerDisplay";
+import { formatDurationHoursMinutes } from "../utils/duration";
+import {
+  formatPlantDateTime,
+  isValidPlantDateTimeRange,
+  toPlantRequestDateTime,
+} from "../utils/plantTime";
+import {
+  runLatestPageTask,
+  runPageTask,
+  usePageSessionState,
+} from "../state/pageSessionStore";
 
 const SCORE_BANDS = [
   {
@@ -84,6 +96,18 @@ const STAT_SCOPES = [
 ];
 
 const MAX_DETAIL_CYCLES = 120;
+
+function comparisonQueryKey(formData) {
+  return JSON.stringify({
+    bucket: formData.bucket || "",
+    field: formData.field || "",
+    tag_id: formData.tag_id || "",
+    source_unit: formData.source_unit || "bar",
+    start_time: toPlantRequestDateTime(formData.start_time) || formData.start_time || "",
+    stop_time: toPlantRequestDateTime(formData.stop_time) || formData.stop_time || "",
+    smooth_window: Number(formData.smooth_window || 0),
+  });
+}
 
 function getScopeByKey(scopeKey) {
   return STAT_SCOPES.find((scope) => scope.key === scopeKey) || STAT_SCOPES[0];
@@ -170,13 +194,7 @@ function getScoreColor(score) {
 }
 
 function formatDateTime(value) {
-  if (!value) return "-";
-
-  try {
-    return new Date(value).toLocaleString();
-  } catch {
-    return String(value);
-  }
+  return value ? formatPlantDateTime(value) : "-";
 }
 
 function buildStagePatternForRca(cycle, stageFocus) {
@@ -300,7 +318,7 @@ function MiniCycleChart({ cycle, unit }) {
         const item = params?.[0];
         if (!item) return "";
 
-        const time = new Date(item.axisValue).toLocaleString();
+        const time = formatPlantDateTime(item.axisValue);
         const lines = params
           .map((p) => {
             const value = Number(p.data?.[1]);
@@ -408,9 +426,8 @@ function StatisticsCard({ scope, statistics, onOpenDetail }) {
             key={row.key}
             title={`${row.label}: ${row.percentage.toFixed(1)}%`}
             style={{
-              width: `${row.percentage}%`,
+              flex: `0 0 ${row.percentage}%`,
               background: row.color,
-              minWidth: row.percentage > 0 ? 5 : 0,
             }}
           />
         ))}
@@ -466,6 +483,17 @@ function DetailModal({
   onGenerateRca,
   onSwitchDetailScope,
 }) {
+  useEffect(() => {
+    if (!detailView) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [detailView, onClose]);
+
   if (!detailView) return null;
 
   const { scope, band } = detailView;
@@ -520,8 +548,18 @@ function DetailModal({
     : [];
 
   return (
-    <div className="analysis-modal-backdrop">
-      <div className="analysis-modal analysis-modal-wide">
+    <div
+      className="analysis-modal-backdrop"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="analysis-modal analysis-modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Cycle Analysis Feedback"
+      >
         <div className="analysis-modal-header">
           <div>
             <h2>
@@ -647,7 +685,7 @@ function DetailModal({
                   <div className="analysis-score-nav-card static">
                     <span>Duration</span>
                     <strong>
-                      {Number(selectedCycle.duration_seconds ?? 0).toFixed(1)}s
+                      {formatDurationHoursMinutes(selectedCycle.duration_seconds)}
                     </strong>
                     <small>Cycle length</small>
                   </div>
@@ -656,9 +694,9 @@ function DetailModal({
                 <div className="analysis-rca-panel">
                   <div className="analysis-rca-panel-top">
                     <div>
-                      <h3>AI RCA Feedback</h3>
+                      <h3>AI Analysis Feedback</h3>
                       <p>
-                        RCA is generated on demand for the selected abnormal
+                        Analysis is generated on demand for the selected abnormal
                         cycle or stage.
                       </p>
                     </div>
@@ -671,12 +709,12 @@ function DetailModal({
                         onClick={() => onGenerateRca(selectedCycle, scope)}
                       >
                         {isLoading
-                          ? "Generating RCA..."
-                          : `Generate RCA for ${scope.stageFocus || "Cycle"}`}
+                          ? "Generating Analysis..."
+                          : `Generate Analysis for ${scope.stageFocus || "Cycle"}`}
                       </button>
                     ) : (
                       <span className="analysis-rca-skip-badge">
-                        RCA skipped: selected score ≥ 75%
+                        AI Analysis is not required because the selected score is 75% or above.
                       </span>
                     )}
                   </div>
@@ -686,7 +724,7 @@ function DetailModal({
                   ) : (
                     <div className="analysis-rca-empty">
                       {rcaAllowed
-                        ? "Click Generate RCA to retrieve related RCA rules and recommendations."
+                        ? "Click Generate Analysis to retrieve related analysis rules and recommendations."
                         : "This cycle is within the acceptable band for the selected category."}
                     </div>
                   )}
@@ -708,13 +746,27 @@ function ComparisonParameterDrawer({
   onAnalyze,
   loading,
 }) {
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
+
   return (
-    <div className={`parameter-drawer-backdrop ${open ? "open" : ""}`}>
-      <div className="parameter-drawer-panel">
+    <div
+      className={`parameter-drawer-backdrop ${open ? "open" : ""}`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="parameter-drawer-panel" role="dialog" aria-modal="true" aria-label="Analysis Setup">
         <div className="parameter-drawer-header">
           <div>
-            <h2>Analysis Parameters</h2>
-            <p>Set the comparison window and source channel.</p>
+            <h2>Analysis Setup</h2>
           </div>
 
           <button type="button" className="btn-secondary" onClick={onClose}>
@@ -728,14 +780,8 @@ function ComparisonParameterDrawer({
             setFormData={setFormData}
             onDetect={onAnalyze}
             loading={loading}
-            submitLabel="Analyze Cycles"
+            submitLabel="Run Analysis"
           />
-
-          <div className="info-banner">
-            V4 score bands: <strong>≥90</strong> Excellent,{" "}
-            <strong>75–89</strong> Good, <strong>60–74</strong> Fair,{" "}
-            <strong>50–59</strong> Poor, <strong>&lt;50</strong> Critical.
-          </div>
         </div>
       </div>
     </div>
@@ -743,77 +789,203 @@ function ComparisonParameterDrawer({
 }
 
 export default function ComparisonPage() {
-  const location = useLocation();
+  const { user } = useAuth();
+  const navigate = useNavigate();
   const [parameterOpen, setParameterOpen] = useState(false);
 
-  const [formData, setFormData] = useState({
-    bucket: "Mill",
-    measurement: "PSTR",
-    field: "ch4",
-    tag_id: "",
-    source_unit: "bar",
-    start_time: "",
-    stop_time: "",
-    smooth_window: 9,
-  });
-
-  const [selectedBenchmarkFile] = useState(
-    location.state?.selectedBenchmarkFile ||
-      localStorage.getItem("selectedBenchmarkFile") ||
-      ""
+  const [formData, setFormData] = usePageSessionState(
+    "comparison",
+    "formData",
+    {
+      bucket: "",
+      field: "",
+      tag_id: "",
+      plant_display_name: "",
+      source_unit: "bar",
+      start_time: "",
+      stop_time: "",
+      smooth_window: 9,
+    }
   );
 
-  const [loadedBenchmark, setLoadedBenchmark] = useState(() => {
-    if (location.state?.loadedBenchmark) {
-      return location.state.loadedBenchmark;
-    }
+  const [selectedBenchmarkId, setSelectedBenchmarkId] = useState("");
+  const [loadedBenchmark, setLoadedBenchmark] = useState(null);
+  const [benchmarkLoading, setBenchmarkLoading] = useState(false);
 
-    const saved = localStorage.getItem("loadedBenchmark");
-    return saved ? JSON.parse(saved) : null;
-  });
-
-  const [comparisonResult, setComparisonResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [benchmarkError, setBenchmarkError] = useState("");
-  const [error, setError] = useState("");
+  const [comparisonResult, setComparisonResult] = usePageSessionState(
+    "comparison",
+    "result",
+    null,
+    { persist: false }
+  );
+  const [resultBenchmarkId, setResultBenchmarkId] = usePageSessionState(
+    "comparison",
+    "resultBenchmarkId",
+    "",
+    { persist: false }
+  );
+  const [loading, setLoading] = usePageSessionState(
+    "comparison",
+    "loading",
+    false,
+    { persist: false }
+  );
+  const [benchmarkError, setBenchmarkError] = usePageSessionState(
+    "comparison",
+    "benchmarkError",
+    "",
+    { persist: false }
+  );
+  const [benchmarkMissing, setBenchmarkMissing] = useState(false);
+  const [error, setError] = usePageSessionState(
+    "comparison",
+    "error",
+    "",
+    { persist: false }
+  );
 
   const [detailView, setDetailView] = useState(null);
   const [selectedDetailCycleKey, setSelectedDetailCycleKey] = useState("");
-  const [rcaCache, setRcaCache] = useState({});
-  const [rcaLoadingKey, setRcaLoadingKey] = useState("");
-  const [rcaError, setRcaError] = useState("");
+  const [rcaCache, setRcaCache] = usePageSessionState(
+    "comparison",
+    "rcaCache",
+    {}
+  );
+  const [rcaLoadingKey, setRcaLoadingKey] = usePageSessionState(
+    "comparison",
+    "rcaLoadingKey",
+    "",
+    { persist: false }
+  );
+  const [rcaError, setRcaError] = usePageSessionState(
+    "comparison",
+    "rcaError",
+    "",
+    { persist: false }
+  );
+  const formDataRef = useRef(formData);
+  formDataRef.current = formData;
+  const currentQueryKey = comparisonQueryKey(formData);
+  const previousQueryKeyRef = useRef(currentQueryKey);
 
   useEffect(() => {
-    const loadBenchmarkIfNeeded = async () => {
-      if (!loadedBenchmark && selectedBenchmarkFile) {
-        try {
-          const res = await api.get(`/api/benchmarks/${selectedBenchmarkFile}`);
-          setLoadedBenchmark(res.data.benchmark);
-          localStorage.setItem(
-            "loadedBenchmark",
-            JSON.stringify(res.data.benchmark)
-          );
-        } catch (err) {
-          setBenchmarkError(err?.response?.data?.detail || err.message);
+    if (previousQueryKeyRef.current === currentQueryKey) return;
+    previousQueryKeyRef.current = currentQueryKey;
+    setComparisonResult(null);
+    setResultBenchmarkId("");
+    setDetailView(null);
+    setSelectedDetailCycleKey("");
+    setRcaCache({});
+    setRcaLoadingKey("");
+    setRcaError("");
+    setError("");
+  }, [
+    currentQueryKey,
+    setComparisonResult,
+    setResultBenchmarkId,
+    setRcaCache,
+    setRcaLoadingKey,
+    setRcaError,
+    setError,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadActiveBenchmark = async () => {
+      const tagId = String(formData.tag_id || "").trim();
+      const field = String(formData.field || "").trim();
+
+      // Active benchmark selection belongs to Settings/Supabase. Benchmark
+      // Management preview state must never determine comparison behavior.
+      setSelectedBenchmarkId("");
+      setLoadedBenchmark(null);
+      setBenchmarkError("");
+      setBenchmarkMissing(false);
+
+      if (!tagId || !field) {
+        setBenchmarkLoading(false);
+        return;
+      }
+
+      try {
+        setBenchmarkLoading(true);
+        const res = await api.get(
+          `/api/active-benchmark/${encodeURIComponent(tagId)}/${encodeURIComponent(field)}`
+        );
+
+        if (cancelled) return;
+
+        const benchmark = res.data?.benchmark || null;
+        const benchmarkId = String(
+          benchmark?.benchmark_id || benchmark?.database_id || ""
+        ).trim();
+        if (!benchmark || !benchmarkId || !benchmark?.file_name) {
+          throw new Error("Active benchmark response is incomplete.");
         }
+
+        setLoadedBenchmark(benchmark);
+        setSelectedBenchmarkId(benchmarkId);
+      } catch (err) {
+        if (cancelled) return;
+        setSelectedBenchmarkId("");
+        setLoadedBenchmark(null);
+        if (err?.response?.status === 404) {
+          setBenchmarkMissing(true);
+          setBenchmarkError("");
+        } else {
+          setBenchmarkMissing(false);
+          setBenchmarkError("The active benchmark could not be loaded. Please try again.");
+        }
+      } finally {
+        if (!cancelled) setBenchmarkLoading(false);
       }
     };
 
-    loadBenchmarkIfNeeded();
-  }, [loadedBenchmark, selectedBenchmarkFile]);
+    loadActiveBenchmark();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [formData.tag_id, formData.field]);
+
+  useEffect(() => {
+    if (
+      comparisonResult &&
+      resultBenchmarkId &&
+      resultBenchmarkId !== selectedBenchmarkId
+    ) {
+      setComparisonResult(null);
+      setResultBenchmarkId("");
+      setRcaCache({});
+      setRcaError("");
+    }
+  }, [
+    comparisonResult,
+    resultBenchmarkId,
+    selectedBenchmarkId,
+    setComparisonResult,
+    setResultBenchmarkId,
+    setRcaCache,
+    setRcaError,
+  ]);
 
   const validateQueryForm = () => {
-    if (!formData.bucket?.trim()) return "Please enter Bucket.";
-    if (!formData.measurement?.trim()) return "Please enter Measurement.";
-    if (!formData.field?.trim()) return "Please enter Field / Channel.";
-    if (!formData.tag_id?.trim()) return "Please enter Tag ID.";
-    if (!formData.source_unit?.trim()) return "Please choose Source Unit.";
+    if (!formData.field?.trim()) return "Please select a sterilizer.";
+    if (!formData.tag_id?.trim()) return "Please select a Data ID.";
+    if (!formData.source_unit?.trim()) return "Please choose Pressure Unit.";
     if (!formData.start_time?.trim()) return "Please enter Start Time.";
     if (!formData.stop_time?.trim()) return "Please enter Stop Time.";
 
     if (
-      new Date(formData.start_time).getTime() >=
-      new Date(formData.stop_time).getTime()
+      !toPlantRequestDateTime(formData.start_time) ||
+      !toPlantRequestDateTime(formData.stop_time)
+    ) {
+      return "Please enter Start Time and Stop Time as DD/MM/YYYY HH:mm.";
+    }
+
+    if (
+      !isValidPlantDateTimeRange(formData.start_time, formData.stop_time)
     ) {
       return "Stop Time must be later than Start Time.";
     }
@@ -832,42 +1004,42 @@ export default function ComparisonPage() {
     console.error("Compare cycles error:", err);
 
     if (err?.code === "ECONNABORTED") {
-      return "Connection timeout: backend took too long to respond. Try a shorter time range first.";
+      return "The analysis did not complete in time. Try a shorter time range and run the analysis again.";
     }
 
     if (err?.response) {
-      return (
-        err.response.data?.detail ||
-        `Backend error ${err.response.status}: ${err.response.statusText}`
-      );
+      if (err.response.status >= 500) {
+        return "The analysis service could not complete the request. Please try again.";
+      }
+      return err.response.data?.detail || "The analysis request could not be completed. Check the selected setup and try again.";
     }
 
     if (err?.request) {
-      return "Connection Error: frontend cannot reach FastAPI. Check that backend is running on http://127.0.0.1:8000.";
+      return "The analysis service could not be reached. Please try again.";
     }
 
-    return err?.message || "Unknown frontend error.";
+    return "The analysis could not be completed. Please try again.";
   };
 
   const getRcaErrorMessage = (err) => {
-    console.error("RCA feedback error:", err);
+    console.error("AI analysis feedback error:", err);
 
     if (err?.code === "ECONNABORTED") {
-      return "RCA timeout: backend took too long to generate RCA feedback. Set ENABLE_RERANKER=false for faster local CPU testing.";
+      return "AI Analysis did not complete in time. Please try again.";
     }
 
     if (err?.response) {
-      return (
-        err.response.data?.detail ||
-        `RCA backend error ${err.response.status}: ${err.response.statusText}`
-      );
+      if (err.response.status >= 500) {
+        return "AI Analysis could not be generated. Please try again.";
+      }
+      return err.response.data?.detail || "AI Analysis could not be generated for the selected cycle. Please try again.";
     }
 
     if (err?.request) {
-      return "RCA connection error: frontend cannot reach FastAPI.";
+      return "The AI Analysis service could not be reached. Please try again.";
     }
 
-    return err?.message || "Unknown RCA error.";
+    return "AI Analysis could not be generated. Please try again.";
   };
 
   const handleRunAnalysis = async () => {
@@ -877,32 +1049,61 @@ export default function ComparisonPage() {
       return;
     }
 
-    if (!selectedBenchmarkFile) {
-      setError("Please select a benchmark first.");
+    if (benchmarkLoading) {
+      setError("Please wait while the active benchmark is loading.");
       return;
     }
 
-    try {
-      setLoading(true);
+    if (!selectedBenchmarkId) {
+      if (!benchmarkError) setBenchmarkMissing(true);
       setError("");
-      setRcaError("");
-      setComparisonResult(null);
-      setDetailView(null);
-      setSelectedDetailCycleKey("");
-      setRcaCache({});
-
-      const res = await api.post("/api/compare-cycles", {
-        ...formData,
-        benchmark_file_name: selectedBenchmarkFile,
-      });
-
-      setComparisonResult(res.data);
-      setParameterOpen(false);
-    } catch (err) {
-      setError(getCompareErrorMessage(err));
-    } finally {
-      setLoading(false);
+      return;
     }
+
+    const requestedFormData = {
+      bucket: formData.bucket || "",
+      field: formData.field || "",
+      tag_id: formData.tag_id || "",
+      source_unit: formData.source_unit || "bar",
+      start_time: toPlantRequestDateTime(formData.start_time),
+      stop_time: toPlantRequestDateTime(formData.stop_time),
+      smooth_window: Number(formData.smooth_window || 9),
+    };
+    const requestedQueryKey = comparisonQueryKey(requestedFormData);
+
+    return runLatestPageTask("comparison:analyze", async ({ isLatest }) => {
+      try {
+        setLoading(true);
+        setError("");
+        setRcaError("");
+        setComparisonResult(null);
+        setDetailView(null);
+        setSelectedDetailCycleKey("");
+        setRcaCache({});
+
+        const res = await api.post("/api/compare-cycles", {
+          ...requestedFormData,
+        });
+
+        if (
+          !isLatest() ||
+          comparisonQueryKey(formDataRef.current) !== requestedQueryKey
+        ) return;
+        const actualBenchmarkId =
+          res.data?.benchmark_id || selectedBenchmarkId;
+        setSelectedBenchmarkId(actualBenchmarkId);
+        setComparisonResult(res.data);
+        setResultBenchmarkId(actualBenchmarkId);
+        setParameterOpen(false);
+      } catch (err) {
+        if (
+          isLatest() &&
+          comparisonQueryKey(formDataRef.current) === requestedQueryKey
+        ) setError(getCompareErrorMessage(err));
+      } finally {
+        if (isLatest()) setLoading(false);
+      }
+    });
   };
 
   const handleOpenCycleFromChart = (cycle) => {
@@ -948,26 +1149,31 @@ export default function ComparisonPage() {
       return;
     }
 
-    try {
-      setRcaLoadingKey(cacheKey);
-      setRcaError("");
+    return runPageTask(`comparison:rca:${cacheKey}`, async () => {
+      try {
+        setRcaLoadingKey(cacheKey);
+        setRcaError("");
 
-      const scoringResult = buildScoringResultForRca(cycle, scope, formData);
+        const scoringResult = buildScoringResultForRca(cycle, scope, {
+          ...formData,
+          measurement: comparisonResult?.source_measurement || "",
+        });
 
-      const res = await api.post("/rag/feedback", {
-        scoring_result: scoringResult,
-        peer_confirmation_available: false,
-      });
+        const res = await api.post("/rag/feedback", {
+          scoring_result: scoringResult,
+          peer_confirmation_available: false,
+        });
 
-      setRcaCache((prev) => ({
-        ...prev,
-        [cacheKey]: res.data,
-      }));
-    } catch (err) {
-      setRcaError(getRcaErrorMessage(err));
-    } finally {
-      setRcaLoadingKey("");
-    }
+        setRcaCache((prev) => ({
+          ...prev,
+          [cacheKey]: res.data,
+        }));
+      } catch (err) {
+        setRcaError(getRcaErrorMessage(err));
+      } finally {
+        setRcaLoadingKey("");
+      }
+    });
   };
 
   const cycleResults = comparisonResult?.cycle_results || [];
@@ -983,21 +1189,25 @@ export default function ComparisonPage() {
   }, [cycleResults]);
 
   const chartUnit =
-    comparisonResult?.benchmark_unit ||
+    comparisonResult?.source_unit ||
     loadedBenchmark?.benchmark_unit ||
     loadedBenchmark?.unit ||
     formData.source_unit ||
     "bar";
 
   const selectedSterilizerLabel = formData.tag_id
-    ? getSterilizerDisplayName(formData.tag_id, formData.field)
+    ? getSterilizerDisplayName(
+        formData.tag_id,
+        formData.field,
+        formData.plant_display_name
+      )
     : "";
 
   return (
     <div className="app-shell">
       <TopNav />
 
-      <main className="app-main">
+      <main className="app-main comparison-page">
         <header className="dashboard-topbar compact-dashboard-topbar">
           <div className="dashboard-title-group">
             <div className="dashboard-title-row">
@@ -1010,10 +1220,6 @@ export default function ComparisonPage() {
               )}
             </div>
 
-            <p>
-              Compare sterilizer cycles against the selected benchmark and run
-              RCA on demand.
-            </p>
           </div>
 
           <div className="dashboard-actions">
@@ -1022,31 +1228,63 @@ export default function ComparisonPage() {
               className="btn-secondary"
               onClick={() => setParameterOpen(true)}
             >
-              Parameters
+              Analysis Setup
             </button>
 
             <button
               type="button"
               className="btn-primary"
-              disabled={loading}
+              disabled={loading || benchmarkLoading || !selectedBenchmarkId}
               onClick={handleRunAnalysis}
             >
-              {loading ? "Analyzing..." : "Analyze"}
+              {loading
+                ? "Running Analysis..."
+                : benchmarkLoading
+                  ? "Loading Benchmark..."
+                  : "Run Analysis"}
             </button>
           </div>
         </header>
 
-        {!selectedBenchmarkFile && (
-          <div className="error-box">
-            No benchmark selected. Please return to Benchmark Management and
-            load one first.
-          </div>
-        )}
+        {formData.tag_id &&
+          formData.field &&
+          !benchmarkLoading &&
+          !selectedBenchmarkId &&
+          benchmarkMissing && (
+            <div className="error-box actionable-error-box">
+              <div>
+                <strong>No Active Benchmark</strong>
+                <span>
+                  The selected sterilizer does not have an active benchmark. Configure one before running the analysis.
+                </span>
+              </div>
+              {user?.role !== "viewer" ? (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() =>
+                    navigate("/settings", {
+                      state: {
+                        settingsFocus: {
+                          data_id: formData.tag_id,
+                          field: formData.field,
+                        },
+                      },
+                    })
+                  }
+                >
+                  Open Settings
+                </button>
+              ) : (
+                <span className="viewer-configuration-note">Contact an Editor or Admin to configure an active benchmark.</span>
+              )}
+            </div>
+          )}
 
         {benchmarkError && <div className="error-box">{benchmarkError}</div>}
         {error && <div className="error-box">{error}</div>}
 
-        <section className="dash-card dashboard-card-large">
+        <section className="dash-card dashboard-card-large comparison-chart-card">
           <div className="dash-card-title">
             Continuous Signal & Benchmark Overlay
           </div>
@@ -1064,7 +1302,7 @@ export default function ComparisonPage() {
               />
             ) : (
               <div className="empty-state">
-                Open Parameters, choose the time window, and run analysis to
+                Open Analysis Setup, choose the time window, and run analysis to
                 view the overlay chart.
               </div>
             )}
@@ -1072,7 +1310,7 @@ export default function ComparisonPage() {
         </section>
 
         {comparisonResult && (
-          <section className="analysis-stat-grid four-stat-grid">
+          <section className="analysis-stat-grid four-stat-grid comparison-stat-grid">
             {STAT_SCOPES.map((scope) => (
               <StatisticsCard
                 key={scope.key}

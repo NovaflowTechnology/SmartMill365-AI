@@ -45,6 +45,8 @@ def select_primary_metric(metrics: Dict[str, Any]) -> Optional[str]:
             "osc_ratio_s3_hold",
         ],
         "CY": [
+            "duration_error_ratio",
+            "duration_ratio",
             "cycle_score",
         ],
     }
@@ -59,9 +61,6 @@ def select_primary_metric(metrics: Dict[str, Any]) -> Optional[str]:
         try:
             value = float(value)
         except Exception:
-            continue
-
-        if metric == "cycle_score":
             continue
 
         if best_value is None or value > best_value:

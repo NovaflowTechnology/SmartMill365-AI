@@ -134,8 +134,17 @@
   background: #ffffff;
 }
 
+.rca-operator-box-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  margin-bottom: 10px;
+}
+
 .rca-operator-box h4 {
-  margin: 0 0 10px;
+  margin: 0;
   color: #1d4ed8;
   font-size: 0.82rem;
   font-weight: 900;
@@ -150,6 +159,102 @@
   line-height: 1.65;
 }
 
+.rca-peer-pressure-block,
+.rca-peer-pressure-unavailable {
+  margin-top: 14px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+  overflow: hidden;
+}
+
+.rca-peer-pressure-unavailable {
+  padding: 10px 12px;
+  color: #64748b;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.rca-peer-pressure-title {
+  padding: 9px 11px 3px;
+  color: #1e40af;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rca-peer-pressure-window {
+  padding: 3px 11px 9px;
+  color: #475569;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.rca-peer-pressure-rows {
+  border-top: 1px solid #dbeafe;
+}
+
+.rca-peer-pressure-row {
+  padding: 10px 11px;
+  background: #ffffff;
+}
+
+.rca-peer-pressure-row + .rca-peer-pressure-row {
+  border-top: 1px solid #e2e8f0;
+}
+
+.rca-peer-pressure-row-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.rca-peer-pressure-row-heading strong {
+  color: #0f172a;
+  font-size: 0.84rem;
+}
+
+.rca-peer-pressure-row-heading span {
+  color: #64748b;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.rca-peer-pressure-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(68px, 1fr));
+  gap: 6px;
+}
+
+.rca-peer-pressure-metric {
+  min-width: 0;
+  padding: 6px 7px;
+  border-radius: 7px;
+  background: #eff6ff;
+}
+
+.rca-peer-pressure-metric span,
+.rca-peer-pressure-metric strong {
+  display: block;
+}
+
+.rca-peer-pressure-metric span {
+  margin-bottom: 2px;
+  color: #64748b;
+  font-size: 0.66rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.rca-peer-pressure-metric strong {
+  color: #1e3a8a;
+  font-size: 0.73rem;
+  white-space: nowrap;
+}
+
 .rca-what-happened-box {
   background: #ffffff;
 }
@@ -161,6 +266,37 @@
 
 .rca-what-to-do-box h4 {
   color: #92400e;
+}
+
+.rca-language-switch {
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 3px;
+  border: 1px solid #fbbf24;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.rca-language-switch button {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: transparent;
+  color: #92400e;
+  font-size: 0.75rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.rca-language-switch button.active {
+  background: #f59e0b;
+  color: #ffffff;
+}
+
+.rca-language-switch button:disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .rca-priority-inline {
@@ -435,6 +571,25 @@
 @media (max-width: 640px) {
   .rca-operator-box {
     padding: 12px;
+  }
+
+  .rca-operator-box-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .rca-peer-pressure-row-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .rca-peer-pressure-row-heading span {
+    text-align: left;
+  }
+
+  .rca-peer-pressure-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .rca-technical-panel {

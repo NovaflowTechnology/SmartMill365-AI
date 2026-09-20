@@ -37,7 +37,7 @@ def format_score_summary(scoring_result: Dict[str, Any]) -> str:
 
 
 def format_rule_context(evaluated_rules: List[Dict[str, Any]], max_rules: int = 3) -> str:
-    lines = ["Retrieved RCA Rule Context"]
+    lines = ["Retrieved Analysis Rule Context"]
 
     for idx, rule in enumerate(evaluated_rules[:max_rules], start=1):
         lines.extend([

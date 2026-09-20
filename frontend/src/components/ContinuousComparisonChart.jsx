@@ -1,21 +1,17 @@
-import { useState } from "react";
 import ReactECharts from "echarts-for-react";
+import { usePageSessionState } from "../state/pageSessionStore";
+import { plantDateTimeParts } from "../utils/plantTime";
 
 function formatAxisDateTime(value, index) {
-  const date = new Date(value);
-  const pad = (n) => String(n).padStart(2, "0");
-
-  const year = date.getFullYear();
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
-  const hour = pad(date.getHours());
-  const minute = pad(date.getMinutes());
+  const parts = plantDateTimeParts(value);
+  if (!parts) return "";
+  const { year, month, day, hour, minute } = parts;
 
   const dateLabel = `${year}-${month}-${day}`;
   const timeLabel = `${hour}:${minute}`;
 
   if (index === 0) return `${dateLabel}\n${timeLabel}`;
-  if (date.getHours() === 0 && date.getMinutes() === 0) {
+  if (hour === "00" && minute === "00") {
     return `${dateLabel}\n${timeLabel}`;
   }
   return timeLabel;
@@ -96,7 +92,11 @@ function buildScoreTextPoints(cycleResults, unit) {
 }
 
 export default function ContinuousComparisonChart({ comparisonResult, unit = "bar", onCycleClick }) {
-  const [showBenchmarkOverlay, setShowBenchmarkOverlay] = useState(true);
+  const [showBenchmarkOverlay, setShowBenchmarkOverlay] = usePageSessionState(
+    "comparison",
+    "showBenchmarkOverlay",
+    true
+  );
 
   const data = comparisonResult?.continuous_overlay_chart || [];
   const cycleResults = comparisonResult?.cycle_results || [];
@@ -111,7 +111,7 @@ export default function ContinuousComparisonChart({ comparisonResult, unit = "ba
     {
       name: "Real-Time",
       type: "line",
-      color: "#3b82f6",
+      color: "#2f6f8f",
       lineStyle: { width: 2 },
       showSymbol: false,
       data: data.map((d) => [d.time, d.realtime_smooth]),
@@ -121,7 +121,7 @@ export default function ContinuousComparisonChart({ comparisonResult, unit = "ba
           {
             name: "Benchmark Overlay",
             type: "line",
-            color: "#10b981",
+            color: "#47765f",
             lineStyle: { type: "dashed", width: 2 },
             showSymbol: false,
             data: data.map((d) => [d.time, d.benchmark_overlay]),
@@ -153,33 +153,34 @@ export default function ContinuousComparisonChart({ comparisonResult, unit = "ba
     tooltip: {
       trigger: "axis",
       backgroundColor: "rgba(255, 255, 255, 0.98)",
-      borderColor: "#e2e8f0",
-      textStyle: { color: "#1e293b" },
+      borderColor: "#b8c5ce",
+      textStyle: { color: "#172734" },
     },
     legend: {
       data: showBenchmarkOverlay
         ? ["Real-Time", "Benchmark Overlay"]
         : ["Real-Time"],
-      bottom: 38,
+      bottom: 25,
       left: "center",
-      textStyle: { color: "#475569", fontSize: 13 },
+      textStyle: { color: "#4f6471", fontSize: 11 },
     },
     grid: {
-      left: 96,
-      right: "4%",
-      top: 42,
-      bottom: 120,
+      left: 78,
+      right: "2%",
+      top: 34,
+      bottom: 88,
       containLabel: false,
     },
     xAxis: {
       type: "time",
       axisLabel: {
-        color: "#64748b",
+        color: "#5d6d79",
         hideOverlap: false,
-        margin: 16,
+        margin: 10,
+        fontSize: 10,
         formatter: formatAxisDateTime,
       },
-      axisLine: { lineStyle: { color: "#94a3b8" } },
+      axisLine: { lineStyle: { color: "#9aabb6" } },
       axisTick: { show: true },
       splitLine: { show: false },
     },
@@ -188,13 +189,19 @@ export default function ContinuousComparisonChart({ comparisonResult, unit = "ba
       min: 0,
       max: yAxisConfig.max,
       interval: yAxisConfig.interval,
-      axisLabel: { color: "#64748b", formatter: yAxisConfig.formatter },
-      axisLine: { show: true, lineStyle: { color: "#94a3b8" } },
-      splitLine: { lineStyle: { type: "dashed", color: "#f1f5f9" } },
+      axisLabel: { color: "#5d6d79", fontSize: 10, formatter: yAxisConfig.formatter },
+      axisLine: { show: true, lineStyle: { color: "#9aabb6" } },
+      splitLine: { lineStyle: { type: "dashed", color: "#dce4e9" } },
     },
     dataZoom: [
       { type: "inside" },
-      { type: "slider", bottom: 6, height: 18 },
+      {
+        type: "slider",
+        bottom: 2,
+        height: 14,
+        borderColor: "#afbec9",
+        fillerColor: "rgba(47, 111, 143, 0.14)",
+      },
     ],
     series,
   };

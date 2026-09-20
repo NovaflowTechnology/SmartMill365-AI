@@ -112,7 +112,7 @@ def generate_llm_text(prompt: str, *, max_new_tokens: Optional[int] = None, syst
 
         default_system_prompt = (
             "You are an industrial process assistant. You explain sterilizer "
-            "pressure-time RCA results in simple, clear English for operators. "
+            "pressure-time analysis results in simple, clear English for operators. "
             "Do not output raw tables unless the user specifically asks for a table."
         )
 

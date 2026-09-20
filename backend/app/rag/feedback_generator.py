@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-VALID_STAGES = {"S1", "S2", "S3"}
+VALID_STAGES = {"S1", "S2", "S3", "CY"}
 
 
 # =============================================================================
@@ -189,7 +189,7 @@ def choose_primary_rule(
 
 def attribution_display(primary_rule: Optional[Dict[str, Any]]) -> str:
     if not primary_rule:
-        return "No RCA rule triggered"
+        return "No analysis rule triggered"
 
     attribution = primary_rule.get("attribution") or primary_rule.get("ml_label") or "Unknown"
     priority = primary_rule.get("priority")
@@ -219,12 +219,12 @@ def attribution_explanation(primary_rule: Optional[Dict[str, Any]]) -> str:
     if attribution == "network":
         return "Possible shared steam network issue affecting more than one sterilizer."
     if attribution == "local":
-        return "Possible local sterilizer issue, such as valve, trap, or sensor-related behaviour."
+        return "Possible local sterilizer issue, such as valve, trap, or sensor-related behavior."
 
     recommendation = str(primary_rule.get("recommendation_en") or "").strip()
     if recommendation:
         return recommendation.split(".")[0].strip() + "."
-    return "Root-cause explanation is based on the triggered RCA rule."
+    return "The explanation is based on the triggered analysis rule."
 
 
 def pattern_explanation(pattern: Any) -> str:
@@ -324,13 +324,13 @@ def threshold_explanation(primary_rule: Optional[Dict[str, Any]]) -> str:
 
     return (
         f"{base_metric} The value is {format_metric_value(metric_value)}, "
-        "which is below the RCA trigger limit."
+        "which is below the analysis trigger limit."
     )
 
 
 def rule_status_explanation(primary_rule: Optional[Dict[str, Any]]) -> str:
     if not primary_rule:
-        return "No RCA rule was selected as the primary explanation."
+        return "No analysis rule was selected as the primary explanation."
 
     status = primary_rule.get("status") or "not_available"
     severity = primary_rule.get("severity") or "not_available"
@@ -372,7 +372,7 @@ def score_explanation(
     }.get(band, "Unable to classify because the score is unavailable.")
 
     if is_selected_stage and band in {"fair", "poor", "critical"}:
-        return f"{base} This selected stage needs RCA review."
+        return f"{base} This selected stage needs further analysis."
     if is_selected_stage:
         return f"{base} This selected stage is not the main abnormal area."
     if is_weakest and band in {"fair", "poor", "critical"}:
@@ -418,6 +418,42 @@ def evidence_display_value(evidence: Dict[str, Any]) -> str:
     )
 
 
+def peer_pressure_condition_explanation(
+    evidence: Dict[str, Any],
+    max_peers: int = 4,
+) -> str:
+    """Format actual affected-stage pressure values for relevant peer sterilizers."""
+    peer = evidence.get("peer_sterilizer_evidence") or {}
+    conditions = peer.get("affected_stage_pressure_conditions") or []
+    if not conditions:
+        # Backward-compatible fallback for evidence payloads created before the
+        # compact display records were introduced.
+        conditions = (evidence.get("pressure_time_evidence") or {}).get("peer_window_stats") or []
+
+    sentences: List[str] = []
+    for item in conditions:
+        if not item.get("available"):
+            continue
+        unit = item.get("source_unit") or item.get("benchmark_unit") or "pressure units"
+        minimum = item.get("min_pressure", item.get("raw_min_pressure"))
+        mean = item.get("mean_pressure", item.get("raw_mean_pressure"))
+        maximum = item.get("max_pressure", item.get("raw_max_pressure"))
+        start = item.get("start_pressure", item.get("raw_start_pressure"))
+        end = item.get("end_pressure", item.get("raw_end_pressure"))
+        condition = item.get("pressure_condition") or "active during the affected stage"
+        sentences.append(
+            f"{item.get('sterilizer_name') or item.get('field')} was {condition} from "
+            f"{item.get('window_start')} to {item.get('window_end')}: minimum {minimum} {unit}, "
+            f"mean {mean} {unit}, maximum {maximum} {unit}, start {start} {unit}, and end {end} {unit}."
+        )
+        if len(sentences) >= max_peers:
+            break
+
+    if not sentences:
+        return "Individual peer pressure values for the affected-stage period were unavailable."
+    return "Affected-stage peer pressure details: " + " ".join(sentences)
+
+
 def _shorten_lines(lines: List[Any], max_lines: int = 4) -> str:
     clean = [str(x).strip() for x in lines if str(x).strip()]
     return " ".join(clean[:max_lines]) if clean else ""
@@ -457,20 +493,28 @@ def evidence_explanation(evidence: Dict[str, Any], primary_rule: Optional[Dict[s
             f"{counts['active_peer_count']} other sterilizer(s) were active during this cycle, "
             f"but no clear new pressure ramp was detected from another sterilizer during the selected stage period. "
             f"{counts['shared_pressure_event_count']} other sterilizer(s) showed notable pressure movement. "
-            "Therefore, direct steam competition is not fully proven by ramp-start evidence."
+            "Therefore, direct steam competition is not fully proven by ramp-start evidence. "
+            + peer_pressure_condition_explanation(evidence)
         )
 
     if attribution == "competition" and counts["concurrent_ramp_count"] > 0:
         return (
             f"{counts['concurrent_ramp_count']} other sterilizer(s) started a pressure ramp during the selected stage period. "
-            "This supports steam demand competition because another sterilizer likely demanded steam at the same time."
+            "This supports steam demand competition because another sterilizer likely demanded steam at the same time. "
+            + peer_pressure_condition_explanation(evidence)
         )
 
-    if attribution == "boiler" and counts["shared_pressure_event_count"] > 0:
+    if attribution in {"boiler", "bpv"} and primary_rule and primary_rule.get("evidence_reason"):
+        # The evaluator includes only the matching auxiliary channel and its
+        # actual readings, so Boiler and BPV details never leak into other causes.
         return (
-            f"{counts['shared_pressure_event_count']} peer sterilizer(s) also showed notable pressure movement during the selected stage period. "
-            "This supports a shared steam supply issue rather than an issue isolated to one sterilizer."
-        )
+            humanize_evidence_text(primary_rule.get("evidence_reason"))
+            + " "
+            + peer_pressure_condition_explanation(evidence)
+        ).strip()
+
+    if attribution == "network":
+        return peer_pressure_condition_explanation(evidence)
 
     if primary_rule and primary_rule.get("evidence_reason"):
         return humanize_evidence_text(primary_rule.get("evidence_reason"))
@@ -596,12 +640,12 @@ def clean_next_actions(
 ) -> List[str]:
     """
     Important fix:
-    - If RCA is confirmed, show the Sheet 7 recommendation as corrective action.
-    - If RCA is candidate, do NOT present the Sheet 7 corrective text as a proven action.
+    - If the analysis finding is confirmed, show the knowledge-base recommendation.
+    - If it is only a candidate, do not present corrective text as a proven action.
       Show a verification-first action instead.
     """
     if not primary_rule:
-        return ["Continue monitoring. No RCA action is required unless the deviation repeats."]
+        return ["Continue monitoring. No analysis action is required unless the deviation repeats."]
 
     status = str(primary_rule.get("status") or "").lower()
     attribution = str(primary_rule.get("attribution") or "").lower()
@@ -616,14 +660,26 @@ def clean_next_actions(
             return [
                 "Verify the suspected boiler/shared steam supply issue. Check whether other sterilizers show the same pressure problem and review boiler pressure data if available."
             ]
+        if attribution == "bpv":
+            return [
+                "Verify the suspected BPV issue using the BPV pressure reading and peer/system behavior from the same affected-stage period before changing valve settings."
+            ]
+        if attribution == "network":
+            return [
+                "Verify the suspected steam-network issue by comparing peer sterilizer pressure behavior in the same affected-stage period."
+            ]
+        if attribution == "local":
+            return [
+                "Verify the suspected local equipment issue by checking the selected sterilizer while confirming that peers do not show the same behavior."
+            ]
         return [
-            "Verify this candidate RCA with additional peer, boiler, BPV, or system pressure evidence before applying corrective action."
+            "Verify this candidate analysis finding with evidence that directly matches the suggested cause before applying corrective action."
         ]
 
     if recommendation:
         return [recommendation]
 
-    return ["Continue monitoring. No RCA action is required unless the deviation repeats."]
+    return ["Continue monitoring. No analysis action is required unless the deviation repeats."]
 
 
 def build_operator_facts(
@@ -665,15 +721,15 @@ def build_operator_facts(
             f"{threshold_explanation(primary_rule)}"
         )
 
-    cause_sentence = f"The most likely root cause suggested by the RCA rule is {attribution}. {attribution_explanation(primary_rule)}"
+    cause_sentence = f"The most likely cause suggested by the analysis rule is {attribution}. {attribution_explanation(primary_rule)}"
 
     status_sentence = ""
     if status == "confirmed":
-        status_sentence = "This RCA is confirmed because the rule threshold was exceeded and supporting evidence was found."
+        status_sentence = "This analysis finding is confirmed because the rule threshold was exceeded and supporting evidence was found."
     elif status == "candidate":
-        status_sentence = "This RCA is only a candidate because the metric suggests this cause, but the supporting evidence is not strong enough to fully prove it."
+        status_sentence = "This analysis finding is only a candidate because the metric suggests this cause, but the supporting evidence is not strong enough to fully prove it."
     else:
-        status_sentence = "This RCA result should be reviewed together with the pressure chart and supporting evidence."
+        status_sentence = "This analysis result should be reviewed together with the pressure chart and supporting evidence."
 
     evidence_sentence = evidence_explanation(evidence, primary_rule)
 
@@ -720,7 +776,7 @@ def metric_human_label(metric_name: Any) -> str:
         return f"the pressure release in {stage}"
     if "hold" in metric or "holding" in metric:
         return f"the holding pressure in {stage}"
-    return f"the pressure behaviour in {stage}"
+    return f"the pressure behavior in {stage}"
 
 
 BAD_LLM_PATTERNS = [
@@ -877,8 +933,8 @@ def generate_llm_operator_explanation(operator_facts: Dict[str, str]) -> Dict[st
 def operator_stage_name(stage: Any) -> str:
     value = str(stage or "").upper().strip()
     return {
-        "S1": "first pressurisation phase",
-        "S2": "second pressurisation phase",
+        "S1": "first pressurization phase",
+        "S2": "second pressurization phase",
         "S3": "pressure holding phase",
         "CY": "overall cycle",
         "EX": "exhaust phase",
@@ -905,18 +961,18 @@ def make_operator_safe_text(value: Any) -> str:
         (r"(?i)\bcombined_error\b", "pressure difference"),
         (r"(?i)\bnormalisation\b|\bnormalization\b", "normal comparison"),
         (r"(?i)\bsub-window\b", "phase period"),
-        (r"(?i)\bStage\s*1\b|\bS1\b", "first pressurisation phase"),
-        (r"(?i)\bStage\s*2\b|\bS2\b", "second pressurisation phase"),
+        (r"(?i)\bStage\s*1\b|\bS1\b", "first pressurization phase"),
+        (r"(?i)\bStage\s*2\b|\bS2\b", "second pressurization phase"),
         (r"(?i)\bStage\s*3\b|\bS3\b", "pressure holding phase"),
-        (r"(?i)\bfirst peak\b", "pressure peak in the first pressurisation phase"),
-        (r"(?i)\bsecond peak\b", "pressure peak in the second pressurisation phase"),
+        (r"(?i)\bfirst peak\b", "pressure peak in the first pressurization phase"),
+        (r"(?i)\bsecond peak\b", "pressure peak in the second pressurization phase"),
         (r"(?i)\bthird peak\b", "pressure peak in the pressure holding phase"),
         (r"(?i)\bMAE_[A-Za-z0-9_]+\b", "pressure difference from normal"),
         (r"(?i)\bRMSE_[A-Za-z0-9_]+\b", "pressure instability"),
         (r"(?i)\bMAE\b", "pressure difference"),
         (r"(?i)\bRMSE\b", "pressure instability"),
-        (r"(?i)\bPattern\s*[A-F]\b", "pressure behaviour"),
-        (r"\b[A-F]\+[A-F](\+[A-F])*\b", "combined pressure behaviour"),
+        (r"(?i)\bPattern\s*[A-F]\b", "pressure behavior"),
+        (r"\b[A-F]\+[A-F](\+[A-F])*\b", "combined pressure behavior"),
         (r"\bP[1-5]\b", "cause group"),
         (r"(?i)\battribution\b", "likely cause"),
         (r"(?i)\bRCA\b", "analysis result"),
@@ -1003,7 +1059,7 @@ def build_action_expansion_facts(
     severity = str(primary_rule.get("severity") or "not_available") if primary_rule else "not_available"
     metric_name = primary_rule.get("metric_name") if primary_rule else None
 
-    pressure_area = "pressure behaviour"
+    pressure_area = "pressure behavior"
     if metric_name:
         pressure_area = make_operator_safe_text(metric_human_label(metric_name))
 
@@ -1011,12 +1067,12 @@ def build_action_expansion_facts(
 
     status_fact = "The analysis result should be reviewed with the available pressure evidence."
     if status == "confirmed":
-        status_fact = "The analysis result is supported by the pressure behaviour and available evidence."
+        status_fact = "The analysis result is supported by the pressure behavior and available evidence."
     elif status == "candidate":
         status_fact = "This is still a possible cause and should be verified before major corrective action."
 
     pattern_fact = make_operator_safe_text(
-        operator_facts.get("pattern_sentence") or "The pressure behaviour is not following the normal reference level."
+        operator_facts.get("pattern_sentence") or "The pressure behavior is not following the normal reference level."
     )
 
     return {
@@ -1151,7 +1207,7 @@ STRICT RULES:
 - Do not use these words: MAE, RMSE, threshold, rule ID, Pattern, benchmark, deviation, metric value, normalisation, normalization, sub-window, P1, P2, P3, P4, P5, attribution, Stage 1, Stage 2, Stage 3, S1, S2, S3, first peak, second peak, third peak.
 - Use "normal reference level" instead of benchmark.
 - Use "difference from normal" instead of deviation.
-- Use "first pressurisation phase", "second pressurisation phase", or "pressure holding phase" instead of Stage/S1/S2/S3.
+- Use "first pressurization phase", "second pressurization phase", or "pressure holding phase" instead of Stage/S1/S2/S3.
 - Keep it under {max_words} words.
 
 Write one or two short paragraphs. The explanation must be complete enough to tell the operator why this action is relevant and what problem it helps verify or correct.
@@ -1171,12 +1227,12 @@ def deterministic_action_explanation(action_facts: Dict[str, str]) -> List[str]:
 
     if status == "candidate":
         return [
-            f"This action is recommended as a verification step because the likely cause is still not fully proven. The {stage} shows pressure behaviour that needs checking, and the available evidence should be compared with the sterilizer schedule and peer pressure charts before a major correction is made.",
+            f"This action is recommended as a verification step because the likely cause is still not fully proven. The {stage} shows pressure behavior that needs checking, and the available evidence should be compared with the sterilizer schedule and peer pressure charts before a major correction is made.",
             f"The action is useful because it helps confirm whether {cause} is really affecting the cycle. {evidence}"
         ]
 
     return [
-        f"This action is recommended because the {stage} shows pressure behaviour that is not following the normal reference level, and the available evidence points toward {cause}.",
+        f"This action is recommended because the {stage} shows pressure behavior that is not following the normal reference level, and the available evidence points toward {cause}.",
         f"The action helps the operator focus on the equipment condition most likely related to this pressure problem, instead of checking unrelated parts first. {evidence}"
     ]
 
@@ -1279,15 +1335,15 @@ def feedback_title(
     if selected_stage:
         if primary_rule and primary_rule.get("status") in {"confirmed", "candidate"}:
             status = str(primary_rule.get("status") or "").title()
-            attribution = primary_rule.get("attribution") or "RCA"
-            return f"{stage_name(selected_stage)} {attribution} RCA {status}"
-        return f"{stage_name(selected_stage)} RCA Feedback"
+            attribution = primary_rule.get("attribution") or "Analysis"
+            return f"{stage_name(selected_stage)} {attribution} Analysis {status}"
+        return f"{stage_name(selected_stage)} Analysis Feedback"
 
     if primary_rule and primary_rule.get("status") in {"confirmed", "candidate"}:
         status = str(primary_rule.get("status") or "").title()
         stage = primary_rule.get("stage") or "Cycle"
-        attribution = primary_rule.get("attribution") or "RCA"
-        return f"{stage} {attribution} RCA {status}"
+        attribution = primary_rule.get("attribution") or "Analysis"
+        return f"{stage} {attribution} Analysis {status}"
 
     if score_band in {"poor", "critical"}:
         return "Significant cycle deviation detected"
@@ -1465,24 +1521,25 @@ def generate_rule_based_feedback(
     if affected_stage and not selected_stage:
         summary_lines.append(f"The most affected stage is {affected_stage}.")
     if display_pattern:
-        summary_lines.append(f"Detected RCA pattern: {display_pattern}.")
+        summary_lines.append(f"Detected analysis pattern: {display_pattern}.")
 
     if primary:
         metric_name = primary.get("metric_name")
         metric_value = primary.get("metric_value")
         if metric_name and metric_value is not None:
-            summary_lines.append(f"The key RCA metric is {metric_name}={format_metric_value(metric_value)}.")
+            summary_lines.append(f"The key analysis metric is {metric_name}={format_metric_value(metric_value)}.")
 
         status = primary.get("status")
         severity = primary.get("severity")
         if status == "confirmed":
             summary_lines.append(f"Rule {primary.get('rule_id')} is confirmed with {severity} severity.")
         elif status == "candidate":
-            summary_lines.append(f"Rule {primary.get('rule_id')} is a candidate RCA with {severity} severity.")
+            summary_lines.append(f"Rule {primary.get('rule_id')} is a candidate analysis finding with {severity} severity.")
         elif primary.get("triggered"):
             summary_lines.append(f"Rule {primary.get('rule_id')} is triggered with {severity} severity.")
 
     recommendation = primary.get("recommendation_en") if primary else None
+    recommendation_bm = primary.get("recommendation_bm") if primary else None
 
     notes: List[str] = []
     if selected_stage:
@@ -1496,19 +1553,26 @@ def generate_rule_based_feedback(
         notes.append(evidence_explanation(evidence_context, primary))
 
     if primary and primary.get("status") == "candidate":
+        attribution = str(primary.get("attribution") or "").strip().lower()
+        required = {
+            "boiler": "matching Boiler pressure and shared peer/system behavior",
+            "bpv": "matching BPV pressure and peer/system behavior",
+            "competition": "a concurrent peer pressure-ramp start",
+            "network": "matching peer/system pressure behavior",
+            "local": "evidence that the issue is isolated to the selected sterilizer",
+        }.get(attribution, "evidence that directly matches the suggested cause")
         notes.append(
-            "This RCA is marked as candidate because the rule requires additional peer/system confirmation, "
-            "such as multiple sterilizers showing the same pattern, boiler data, BPV data, or concurrent demand data."
+            "This analysis finding is marked as a candidate because it still needs " + required + "."
         )
 
     if metrics.get("data_quality_score") is not None and metrics.get("data_quality_score") < 85:
-        notes.append("Data quality issue may affect RCA interpretation. Verify sensor and database readings.")
+        notes.append("Data quality may affect this analysis. Verify sensor and database readings.")
 
     next_actions: List[str] = []
     if recommendation:
         next_actions.append(str(recommendation).strip())
     if not next_actions:
-        next_actions.append("Continue monitoring. No RCA rule exceeded the warning threshold.")
+        next_actions.append("Continue monitoring. No analysis rule exceeded the warning threshold.")
 
     human_feedback = build_human_feedback(
         scoring_result=scoring_result,
@@ -1525,6 +1589,7 @@ def generate_rule_based_feedback(
         "primary_rule": primary,
         "matched_rules": evaluated_rules,
         "recommendation": recommendation,
+        "recommendation_bm": recommendation_bm,
         "next_actions": next_actions,
         "notes": notes,
         "human_feedback": human_feedback,

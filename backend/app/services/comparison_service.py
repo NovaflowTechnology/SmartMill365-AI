@@ -17,6 +17,13 @@ STAGE_WEIGHTS = {
     "s3_score": 0.50,
 }
 
+# Overall cycle score keeps the V4 stage profile as the main component while
+# making duration a meaningful, separately visible part of the score.
+SCORE_COMPONENT_WEIGHTS = {
+    "stage_profile_score": 0.70,
+    "duration_score": 0.30,
+}
+
 WARN_COMBINED_ERROR = 0.13
 CRITICAL_COMBINED_ERROR = 0.23
 OSC_WARN_RATIO = 1.30
@@ -50,20 +57,22 @@ def exponential_score(error, sensitivity=K_EXPONENTIAL):
     return clip_score(100.0 * np.exp(-sensitivity * error))
 
 
-def minmax_normalise_full_cycle(y):
+def minmax_normalise_full_cycle(y, reference_min=None, reference_max=None):
     """
-    V4 full-cycle normalisation:
-        P_norm = (P - min(P_full)) / (max(P_full) - min(P_full))
+    Full-cycle normalisation using an optional shared reference range.
 
-    This is full-cycle normalisation, not per-stage normalisation.
+    The benchmark minimum/maximum must be used for both the benchmark and the
+    actual curve during comparison. Independently normalising each curve would
+    erase absolute pressure loss: a curve at half the expected pressure could
+    otherwise receive the same score as the benchmark.
     """
     y = np.asarray(y, dtype=float)
 
     if len(y) < 2:
-        raise ValueError("Signal too short for full-cycle normalisation.")
+        raise ValueError("Signal too short for full-cycle normalization.")
 
-    y_min = float(np.nanmin(y))
-    y_max = float(np.nanmax(y))
+    y_min = float(np.nanmin(y)) if reference_min is None else float(reference_min)
+    y_max = float(np.nanmax(y)) if reference_max is None else float(reference_max)
     y_range = max(y_max - y_min, 1e-9)
 
     return (y - y_min) / y_range, {
@@ -100,12 +109,24 @@ def normalise_cycle_to_benchmark_length(cycle_df, benchmark_curve, value_col="sm
     actual_raw = cycle_df[value_col].to_numpy(dtype=float)
     actual_resampled = resample_to_n_points(actual_raw, n_points)
 
-    actual_norm, actual_norm_info = minmax_normalise_full_cycle(actual_resampled)
-    bench_norm, bench_norm_info = minmax_normalise_full_cycle(benchmark_curve)
+    benchmark_min = float(np.nanmin(benchmark_curve))
+    benchmark_max = float(np.nanmax(benchmark_curve))
+
+    actual_norm, actual_norm_info = minmax_normalise_full_cycle(
+        actual_resampled,
+        reference_min=benchmark_min,
+        reference_max=benchmark_max,
+    )
+    bench_norm, bench_norm_info = minmax_normalise_full_cycle(
+        benchmark_curve,
+        reference_min=benchmark_min,
+        reference_max=benchmark_max,
+    )
 
     return actual_resampled, benchmark_curve, actual_norm, bench_norm, {
         "actual_normalisation": actual_norm_info,
         "benchmark_normalisation": bench_norm_info,
+        "shared_reference": "benchmark_min_max",
         "normalised_points": int(n_points),
     }
 
@@ -466,7 +487,7 @@ def compute_all_v4_window_metrics(actual_norm, bench_norm, stage_info):
     return metrics
 
 
-def compute_v4_stage_scores(window_metrics):
+def compute_v4_stage_scores(window_metrics, duration_ratio=None):
     s1_combined = window_metrics["combined_s1_full"]
     s2_combined = window_metrics["combined_s2_full"]
     s3_combined = window_metrics["combined_s3_full"]
@@ -475,16 +496,31 @@ def compute_v4_stage_scores(window_metrics):
     s2_score = exponential_score(s2_combined, K_EXPONENTIAL)
     s3_score = exponential_score(s3_combined, K_EXPONENTIAL)
 
-    cycle_score = (
+    stage_profile_score = (
         STAGE_WEIGHTS["s1_score"] * s1_score
         + STAGE_WEIGHTS["s2_score"] * s2_score
         + STAGE_WEIGHTS["s3_score"] * s3_score
     )
 
+    duration_error_ratio = None
+    duration_score = None
+    cycle_score = stage_profile_score
+
+    if duration_ratio is not None and np.isfinite(duration_ratio) and duration_ratio > 0:
+        duration_error_ratio = abs(float(duration_ratio) - 1.0)
+        duration_score = exponential_score(duration_error_ratio, K_EXPONENTIAL)
+        cycle_score = (
+            SCORE_COMPONENT_WEIGHTS["stage_profile_score"] * stage_profile_score
+            + SCORE_COMPONENT_WEIGHTS["duration_score"] * duration_score
+        )
+
     return {
         "s1_score": clip_score(s1_score),
         "s2_score": clip_score(s2_score),
         "s3_score": clip_score(s3_score),
+        "stage_profile_score": clip_score(stage_profile_score),
+        "duration_score": clip_score(duration_score) if duration_score is not None else None,
+        "duration_error_ratio": duration_error_ratio,
         "cycle_score": clip_score(cycle_score),
         "s1_combined_error": float(s1_combined),
         "s2_combined_error": float(s2_combined),
@@ -647,6 +683,22 @@ def determine_affected_stage(stage_scores):
 def build_v4_rca_hints(stage_scores, window_metrics, patterns):
     affected_stage, stage_errors = determine_affected_stage(stage_scores)
 
+    duration_score = stage_scores.get("duration_score")
+    duration_error_ratio = stage_scores.get("duration_error_ratio")
+
+    # If the stage profiles are all acceptable but duration is abnormal, treat
+    # the issue as a cycle-level deviation instead of falsely blaming S1.
+    duration_only_issue = bool(
+        duration_score is not None
+        and duration_score < WARNING_SCORE_THRESHOLD
+        and stage_scores["s1_score"] >= WARNING_SCORE_THRESHOLD
+        and stage_scores["s2_score"] >= WARNING_SCORE_THRESHOLD
+        and stage_scores["s3_score"] >= WARNING_SCORE_THRESHOLD
+    )
+
+    if duration_only_issue:
+        affected_stage = "CY"
+
     # Any stage below 75 should trigger RCA candidate retrieval.
     rca_triggered = (
         stage_scores["s1_score"] < WARNING_SCORE_THRESHOLD
@@ -659,6 +711,7 @@ def build_v4_rca_hints(stage_scores, window_metrics, patterns):
         "S1": stage_scores["s1_score"],
         "S2": stage_scores["s2_score"],
         "S3": stage_scores["s3_score"],
+        "CY": duration_score if duration_score is not None else stage_scores["cycle_score"],
     }[affected_stage]
 
     if patterns:
@@ -668,7 +721,9 @@ def build_v4_rca_hints(stage_scores, window_metrics, patterns):
     else:
         pattern_code = None
 
-    if affected_stage == "S1":
+    if affected_stage == "CY":
+        query = "CY overall cycle duration mismatch duration_error_ratio duration_ratio"
+    elif affected_stage == "S1":
         query = "S1 Stage 1 first peak ramp air purging MAE_s1_peak MAE_s1_ramp Boiler BPV Competition Network Local"
     elif affected_stage == "S2":
         query = "S2 Stage 2 second peak fruitlet loosening MAE_s2_peak MAE_s2_ramp release Competition Boiler BPV Local"
@@ -682,7 +737,11 @@ def build_v4_rca_hints(stage_scores, window_metrics, patterns):
     return {
         "rca_triggered": bool(rca_triggered),
         "affected_stage": affected_stage,
-        "affected_stage_combined_error": float(stage_errors[affected_stage]),
+        "affected_stage_combined_error": float(
+            duration_error_ratio
+            if affected_stage == "CY" and duration_error_ratio is not None
+            else stage_errors[affected_stage]
+        ),
         "affected_stage_score": float(worst_stage_score),
         "pattern": pattern_code,
         "patterns_detected": patterns,
@@ -690,10 +749,32 @@ def build_v4_rca_hints(stage_scores, window_metrics, patterns):
         "systemic_confirmation_available": False,
         "rca_confirmation_note": (
             "Single-cycle benchmark comparison can detect the deviation symptom. "
-            "Boiler/BPV/Competition/Network attribution needs peer sterilizer, boiler, BPV, "
-            "or concurrent demand data for confirmation."
+            "Root-cause attribution needs matching peer, equipment, or concurrent-demand "
+            "evidence for confirmation."
         ),
     }
+
+
+def build_stage_time_boundaries(cycle_df, stage_info):
+    """Convert benchmark-progress stage boundaries into exact cycle timestamps."""
+    start_time = cycle_df["time"].iloc[0]
+    end_time = cycle_df["time"].iloc[-1]
+    duration = end_time - start_time
+    boundaries = stage_info.get("boundaries", {})
+    output = {}
+
+    for stage in ["s1", "s2", "s3", "exhaust"]:
+        start_progress = boundaries.get(f"{stage}_full_start_progress")
+        end_progress = boundaries.get(f"{stage}_full_end_progress")
+        if start_progress is None or end_progress is None:
+            continue
+
+        stage_start = start_time + duration * float(start_progress)
+        stage_end = start_time + duration * float(end_progress)
+        output[f"{stage}_start_time"] = stage_start.isoformat()
+        output[f"{stage}_end_time"] = stage_end.isoformat()
+
+    return output
 
 
 def compute_data_quality_score(cycle_df, value_col="smooth"):
@@ -766,9 +847,9 @@ def generate_v4_feedback(stage_scores, rca_hints, data_quality):
     if band in {"excellent", "good"}:
         messages.append("Cycle follows the benchmark closely based on V4 S1/S2/S3 MAE+RMSE scoring.")
     elif band == "fair":
-        messages.append("Cycle shows noticeable deviation from benchmark. RCA review is recommended.")
+        messages.append("Cycle shows noticeable deviation from benchmark. Further analysis is recommended.")
     elif band == "poor":
-        messages.append("Cycle shows significant deviation from benchmark. RCA is required.")
+        messages.append("Cycle shows significant deviation from benchmark. Detailed analysis is required.")
     else:
         messages.append("Cycle shows severe deviation from benchmark. Immediate inspection is recommended.")
 
@@ -777,11 +858,11 @@ def generate_v4_feedback(stage_scores, rca_hints, data_quality):
         messages.append(f"The most affected stage is {affected_stage}.")
 
     if affected_stage == "S1":
-        messages.append("S1 relates to air purging / first peak behaviour.")
+        messages.append("S1 relates to air purging / first peak behavior.")
     elif affected_stage == "S2":
-        messages.append("S2 relates to fruitlet loosening / second peak behaviour.")
+        messages.append("S2 relates to fruitlet loosening / second peak behavior.")
     elif affected_stage == "S3":
-        messages.append("S3 relates to final holding / sterilization behaviour and carries the highest weight.")
+        messages.append("S3 relates to final holding / sterilization behavior and carries the highest weight.")
 
     patterns = rca_hints.get("patterns_detected", [])
     if patterns:
@@ -796,7 +877,7 @@ def generate_v4_feedback(stage_scores, rca_hints, data_quality):
     if not rca_hints.get("systemic_confirmation_available"):
         messages.append(
             "Current result is based on single-cycle curve comparison. "
-            "Systemic root causes such as Boiler, BPV, Competition, or Network require peer/system data to confirm."
+            "A likely cause can only be confirmed when matching equipment, peer, or concurrent-demand evidence is available."
         )
 
     return messages
@@ -826,15 +907,33 @@ def compare_single_cycle_to_benchmark(cycle_df, benchmark, value_col="smooth"):
 
     stage_info = build_v4_stage_windows_from_benchmark(bench_norm)
     window_metrics = compute_all_v4_window_metrics(actual_norm, bench_norm, stage_info)
-    stage_scores = compute_v4_stage_scores(window_metrics)
-    patterns = derive_divergence_patterns(window_metrics)
-    rca_hints = build_v4_rca_hints(stage_scores, window_metrics, patterns)
-    data_quality = compute_data_quality_score(cycle_df, value_col=value_col)
 
     real_duration = float(
         (cycle_df["time"].iloc[-1] - cycle_df["time"].iloc[0]).total_seconds()
     )
     bench_duration = get_benchmark_duration_seconds(benchmark)
+    duration_ratio = (
+        float(real_duration / bench_duration)
+        if bench_duration and bench_duration > 0
+        else None
+    )
+
+    stage_scores = compute_v4_stage_scores(
+        window_metrics,
+        duration_ratio=duration_ratio,
+    )
+    patterns = derive_divergence_patterns(window_metrics)
+    rca_hints = build_v4_rca_hints(stage_scores, window_metrics, patterns)
+    data_quality = compute_data_quality_score(cycle_df, value_col=value_col)
+    stage_times = build_stage_time_boundaries(cycle_df, stage_info)
+
+    affected_stage_key = str(rca_hints.get("affected_stage") or "").lower()
+    if affected_stage_key == "cy":
+        affected_stage_start = cycle_df["time"].iloc[0].isoformat()
+        affected_stage_end = cycle_df["time"].iloc[-1].isoformat()
+    else:
+        affected_stage_start = stage_times.get(f"{affected_stage_key}_start_time")
+        affected_stage_end = stage_times.get(f"{affected_stage_key}_end_time")
 
     feedback_messages = generate_v4_feedback(stage_scores, rca_hints, data_quality)
 
@@ -882,13 +981,22 @@ def compare_single_cycle_to_benchmark(cycle_df, benchmark, value_col="smooth"):
             "s1_score": round(stage_scores["s1_score"], 2),
             "s2_score": round(stage_scores["s2_score"], 2),
             "s3_score": round(stage_scores["s3_score"], 2),
+            "stage_profile_score": round(stage_scores["stage_profile_score"], 2),
+            "duration_score": (
+                round(stage_scores["duration_score"], 2)
+                if stage_scores.get("duration_score") is not None
+                else None
+            ),
             "cycle_score": round(stage_scores["cycle_score"], 2),
         },
-        "score_weights": STAGE_WEIGHTS,
+        "score_weights": {
+            "stage_weights": STAGE_WEIGHTS,
+            "component_weights": SCORE_COMPONENT_WEIGHTS,
+        },
 
         "metrics": {
             "scoring_version": "V4_MAE_RMSE_TRIPLE_PEAK",
-            "normalisation_method": "full_cycle_minmax_actual_and_benchmark",
+            "normalisation_method": "benchmark_reference_minmax_shared_scale",
             "alignment_method": "full_cycle_progress_interpolation_point_to_point",
             "error_method": "MAE_RMSE_50_50",
             "exponential_k": K_EXPONENTIAL,
@@ -908,16 +1016,18 @@ def compare_single_cycle_to_benchmark(cycle_df, benchmark, value_col="smooth"):
 
             "benchmark_duration_seconds": bench_duration,
             "duration_seconds": real_duration,
-            "duration_ratio": (
-                float(real_duration / bench_duration)
-                if bench_duration and bench_duration > 0
-                else None
-            ),
+            "duration_ratio": duration_ratio,
+            "duration_error_ratio": stage_scores.get("duration_error_ratio"),
+            "duration_score": stage_scores.get("duration_score"),
+            "stage_profile_score": stage_scores.get("stage_profile_score"),
 
             "normalisation_info": norm_info,
             "stage_detection_method": stage_info["stage_detection_method"],
             "stage_boundaries": stage_info["boundaries"],
             "stage_peaks": stage_info["peaks"],
+            **stage_times,
+            "affected_stage_start_time": affected_stage_start,
+            "affected_stage_end_time": affected_stage_end,
 
             # V4 sub-window metrics used by Rules Master / Threshold Library.
             **window_metrics,
