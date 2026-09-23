@@ -10,8 +10,15 @@ import {
   Label,
 } from "recharts";
 import EditableBenchmarkCurve from "./EditableBenchmarkCurve";
+import { getBenchmarkSterilizerName } from "../utils/sterilizerDisplay";
 
-export default function BenchmarkPreview({ benchmark, onSaved }) {
+export default function BenchmarkPreview({
+  benchmark,
+  onSaved,
+  onSetActive,
+  isActive = false,
+  activationLoading = false,
+}) {
   const [currentBenchmark, setCurrentBenchmark] = useState(benchmark);
   const [showEditor, setShowEditor] = useState(false);
 
@@ -30,8 +37,7 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
 
   const unit = currentBenchmark.benchmark_unit || currentBenchmark.unit || "bar";
   const curve = currentBenchmark.benchmark_curve || [];
-  const normalizedPoints =
-    currentBenchmark.normalized_points || curve.length || 0;
+  const sterilizerName = getBenchmarkSterilizerName(currentBenchmark);
 
   const chartData = curve.map((value, index) => ({
     point: index + 1,
@@ -50,6 +56,28 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
 
   return (
     <div className="benchmark-preview-wrapper">
+      <div className="benchmark-preview-mode-banner">
+        <div>
+          <span className="benchmark-preview-mode-badge">PREVIEW / EDIT MODE</span>
+          <strong>Viewing or adjusting this benchmark does not change the active benchmark.</strong>
+          <p>Adjusted curves are saved as a new benchmark.</p>
+        </div>
+        <div className="benchmark-preview-mode-actions">
+          {isActive ? (
+            <span className="active-benchmark-status">Active Benchmark ✓</span>
+          ) : (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => onSetActive?.(currentBenchmark)}
+              disabled={activationLoading}
+            >
+              {activationLoading ? "Updating..." : "Set as Active"}
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="benchmark-preview-card">
         <div className="benchmark-preview-info">
           <div className="info-box">
@@ -60,22 +88,15 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
           </div>
 
           <div className="info-box">
-            <span className="info-label">ID</span>
+            <span className="info-label">Data ID</span>
             <span className="info-value">
-              {currentBenchmark.sterilizer_id || currentBenchmark.id || "-"}
+              {currentBenchmark.tag_id || currentBenchmark.sterilizer_id || currentBenchmark.id || "-"}
             </span>
           </div>
 
           <div className="info-box">
-            <span className="info-label">Field</span>
-            <span className="info-value">{currentBenchmark.field || "-"}</span>
-          </div>
-
-          <div className="info-box">
-            <span className="info-label">Measurement</span>
-            <span className="info-value">
-              {currentBenchmark.measurement || "-"}
-            </span>
+            <span className="info-label">Sterilizer</span>
+            <span className="info-value">{sterilizerName}</span>
           </div>
 
           <div className="info-box">
@@ -88,11 +109,6 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
             <span className="info-value">
               {currentBenchmark.source_cycle_count || "-"}
             </span>
-          </div>
-
-          <div className="info-box">
-            <span className="info-label">Normalised Points</span>
-            <span className="info-value">{normalizedPoints}</span>
           </div>
 
           <div className="info-box">
@@ -111,7 +127,7 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
               className="secondary-btn"
               onClick={() => setShowEditor((prev) => !prev)}
             >
-              {showEditor ? "Hide Curve Editor" : "Edit Curve"}
+              {showEditor ? "Hide Curve Editor" : "Adjust Curve"}
             </button>
           </div>
 
@@ -123,14 +139,14 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
                 data={chartData}
                 margin={{ top: 30, right: 24, left: 24, bottom: 42 }}
               >
-                <CartesianGrid strokeDasharray="3 3" />
+                <CartesianGrid stroke="#dce4e9" strokeDasharray="3 3" />
                 <XAxis
                   dataKey="point"
                   tick={{ fontSize: 12 }}
                   interval="preserveStartEnd"
                 >
                   <Label
-                    value="Normalised Cycle Progress"
+                    value="Normalized Cycle Progress"
                     position="insideBottom"
                     offset={-18}
                     style={{ fontSize: 13 }}
@@ -154,6 +170,7 @@ export default function BenchmarkPreview({ benchmark, onSaved }) {
                 <Line
                   type="monotone"
                   dataKey="benchmark"
+                  stroke="#2f6f8f"
                   strokeWidth={2}
                   dot={false}
                   name="benchmark"

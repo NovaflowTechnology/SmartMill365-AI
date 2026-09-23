@@ -1,30 +1,96 @@
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 import pandas as pd
+
+from app.config import PLANT_TIMEZONE
+from app.services.timezone_service import (
+    get_plant_timezone,
+    normalise_query_range,
+    parse_plant_datetime,
+)
 
 
 PSI_PER_BAR = 14.5038
+
+
+def parse_live_datetime(value, tz_name: str = PLANT_TIMEZONE):
+    """Parse a live-monitoring datetime and make its timezone explicit."""
+    try:
+        return parse_plant_datetime(value, tz_name)
+    except ValueError as exc:
+        raise ValueError("Invalid live monitoring date or time format.") from exc
 
 
 def get_live_window_iso(
     start_time=None,
     stop_time=None,
     last_n_hours: int = 3,
-    tz_name: str = "Asia/Kuala_Lumpur",
+    tz_name: str = PLANT_TIMEZONE,
 ):
     """
     Returns the time range used for live monitoring.
 
-    If custom start_time and stop_time are provided, use them.
+    If custom start_time and stop_time are provided, validate and use them.
     Otherwise, use a moving recent time window from now - last_n_hours to now.
     """
-    if start_time and stop_time:
-        return start_time, stop_time
+    has_start = bool(str(start_time or "").strip())
+    has_stop = bool(str(stop_time or "").strip())
 
-    stop_dt = datetime.now(ZoneInfo(tz_name)).replace(microsecond=0)
+    if has_start != has_stop:
+        raise ValueError(
+            "Both start date/time and end date/time are required for a custom range."
+        )
+
+    if has_start and has_stop:
+        return normalise_query_range(start_time, stop_time, tz_name)
+
+    if int(last_n_hours or 0) <= 0:
+        raise ValueError("The latest monitoring window must be greater than 0 hours.")
+
+    stop_dt = datetime.now(get_plant_timezone(tz_name)).replace(microsecond=0)
     start_dt = stop_dt - timedelta(hours=last_n_hours)
 
-    return start_dt.isoformat(), stop_dt.isoformat()
+    return (
+        start_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        stop_dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+    )
+
+
+def get_live_window_hours(start_time, stop_time, tz_name: str = PLANT_TIMEZONE):
+    """Return the validated live-monitoring window duration in hours."""
+    start_dt = parse_live_datetime(start_time, tz_name=tz_name)
+    stop_dt = parse_live_datetime(stop_time, tz_name=tz_name)
+    duration_hours = (stop_dt - start_dt).total_seconds() / 3600
+
+    if duration_hours <= 0:
+        raise ValueError("End date/time must be later than start date/time.")
+
+    return duration_hours
+
+
+def get_live_aggregate_window(hours: float) -> str:
+    """
+    Choose a display resolution that preserves a sterilizer cycle's ramp,
+    holding plateau, and release while keeping long requests manageable.
+
+    A one-week request previously used 30-minute means. That left only a few
+    points per cycle, so the chart connected those points as artificial
+    triangles and cycle detection operated on heavily distorted data.
+
+    These limits keep a typical request near or below about 10,080 points per
+    sterilizer (one point per minute for seven days).
+    """
+    duration_hours = float(hours or 0)
+    if duration_hours <= 0:
+        raise ValueError("Live monitoring duration must be greater than 0 hours.")
+    if duration_hours <= 24:
+        return "30s"
+    if duration_hours <= 168:
+        return "1m"
+    if duration_hours <= 336:
+        return "2m"
+    if duration_hours <= 744:
+        return "5m"
+    return "10m"
 
 
 def convert_bar_to_display(value, display_unit="bar"):

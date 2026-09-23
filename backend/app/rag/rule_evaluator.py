@@ -118,7 +118,7 @@ def _evidence_flags(evidence: Optional[Dict[str, Any]]) -> Dict[str, bool]:
 
 def _evidence_summary(evidence: Optional[Dict[str, Any]]) -> str:
     if not evidence:
-        return "No peer/competition evidence was provided to the RCA evaluator."
+        return "No peer or concurrent-demand evidence was provided to the analysis evaluator."
 
     lines = evidence.get("summary_lines") or []
     if lines:
@@ -129,6 +129,37 @@ def _evidence_summary(evidence: Optional[Dict[str, Any]]) -> str:
         return str(reason)
 
     return "Pressure-time peer/competition evidence was checked, but no summary was generated."
+
+
+def _format_auxiliary_pressure_evidence(
+    evidence: Optional[Dict[str, Any]],
+    cause_key: str,
+) -> str:
+    """Format only the equipment channel relevant to the evaluated cause."""
+    if not evidence:
+        return ""
+
+    item = (evidence.get("auxiliary_pressure_evidence") or {}).get(cause_key) or {}
+    stats = item.get("stage_window_stats") or {}
+    if not item.get("available") or not stats.get("available"):
+        return ""
+
+    display_name = str(item.get("display_name") or cause_key.upper())
+    unit = stats.get("source_unit") or stats.get("benchmark_unit") or "pressure units"
+    minimum = stats.get("raw_min_pressure", stats.get("min_pressure"))
+    mean = stats.get("raw_mean_pressure", stats.get("mean_pressure"))
+    maximum = stats.get("raw_max_pressure", stats.get("max_pressure"))
+    start = stats.get("raw_start_pressure", stats.get("start_pressure"))
+    end = stats.get("raw_end_pressure", stats.get("end_pressure"))
+    condition = item.get("pressure_condition") or "recorded during the affected stage"
+
+    return (
+        f"{display_name} pressure ({item.get('field')}) was {condition} during the affected-stage window "
+        f"from {stats.get('window_start')} to {stats.get('window_end')}: "
+        f"minimum {minimum} {unit}, mean {mean} {unit}, maximum {maximum} {unit}, "
+        f"start {start} {unit}, and end {end} {unit}. "
+        "No normal equipment reference threshold was supplied, so these readings are supporting observations only."
+    )
 
 
 def evidence_confirms_rule(chunk: Dict[str, Any], evidence: Optional[Dict[str, Any]]) -> bool:
@@ -143,7 +174,10 @@ def evidence_confirms_rule(chunk: Dict[str, Any], evidence: Optional[Dict[str, A
         return flags.get("competition_confirmation_available", False)
 
     if attribution == "boiler" or priority == "P1":
-        return flags.get("boiler_or_system_confirmation_available", False)
+        return bool(
+            flags.get("boiler_or_system_confirmation_available", False)
+            and flags.get("boiler_pressure_evidence_available", False)
+        )
 
     if attribution == "network" or priority == "P4":
         return flags.get("boiler_or_system_confirmation_available", False) or flags.get(
@@ -151,9 +185,10 @@ def evidence_confirms_rule(chunk: Dict[str, Any], evidence: Optional[Dict[str, A
         )
 
     if attribution == "bpv" or priority == "P2":
-        # Without a BPV pressure tag, use peer/system confirmation as supporting
-        # evidence. If BPV tag evidence is added later, extend this branch.
-        return flags.get("peer_confirmation_available", False)
+        return bool(
+            flags.get("peer_confirmation_available", False)
+            and flags.get("bpv_pressure_evidence_available", False)
+        )
 
     if attribution == "local" or priority == "P5":
         return flags.get("local_confirmation_available", False)
@@ -176,9 +211,26 @@ def evidence_reason_for_rule(chunk: Dict[str, Any], evidence: Optional[Dict[str,
         return "Competition could not be fully confirmed because no peer pressure-time ramp start was detected in the selected stage window. " + summary
 
     if attribution == "boiler" or priority == "P1":
-        if flags.get("boiler_or_system_confirmation_available"):
-            return "Shared steam supply evidence is available because multiple peer sterilizers show pressure-time activity or pressure movement in the same stage window. " + summary
-        return "Boiler/shared supply could not be fully confirmed because not enough peer sterilizer evidence was found. " + summary
+        equipment = _format_auxiliary_pressure_evidence(evidence, "boiler")
+        if evidence_confirms_rule(chunk, evidence):
+            return "Shared steam supply evidence is available because Boiler pressure and multiple peer sterilizers were observed in the same stage window. " + equipment + " " + summary
+        missing = []
+        if not flags.get("boiler_pressure_evidence_available"):
+            missing.append("Boiler pressure")
+        if not flags.get("boiler_or_system_confirmation_available"):
+            missing.append("shared peer/system behavior")
+        return "Boiler/shared supply could not be fully confirmed because " + " and ".join(missing or ["supporting evidence"]) + " was not available. " + equipment + " " + summary
+
+    if attribution == "bpv" or priority == "P2":
+        equipment = _format_auxiliary_pressure_evidence(evidence, "bpv")
+        if evidence_confirms_rule(chunk, evidence):
+            return "BPV evidence is available because BPV pressure and peer/system activity were observed in the same stage window. " + equipment + " " + summary
+        missing = []
+        if not flags.get("bpv_pressure_evidence_available"):
+            missing.append("BPV pressure")
+        if not flags.get("peer_confirmation_available"):
+            missing.append("peer/system behavior")
+        return "BPV could not be fully confirmed because " + " and ".join(missing or ["supporting evidence"]) + " was not available. " + equipment + " " + summary
 
     if attribution == "network" or priority == "P4":
         if flags.get("boiler_or_system_confirmation_available") or flags.get("peer_confirmation_available"):
@@ -234,10 +286,10 @@ def evaluate_single_rule(
         status = "not_triggered"
     elif evidence_confirmed:
         status = "confirmed"
-        reason += " Extra evidence confirms this RCA. " + evidence_reason
-    elif requires_extra and not peer_confirmation_available:
+        reason += " Extra evidence confirms this analysis finding. " + evidence_reason
+    elif requires_extra and not evidence_confirmed:
         status = "candidate"
-        reason += " Extra evidence is required before confirming this RCA. " + evidence_reason
+        reason += " Extra evidence is required before confirming this analysis finding. " + evidence_reason
     else:
         status = "confirmed"
         if evidence and evidence.get("available"):

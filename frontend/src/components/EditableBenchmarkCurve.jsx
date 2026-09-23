@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import api from "../api";
+import NotificationToast from "./NotificationToast";
 
 const SVG_WIDTH = 980;
 const SVG_HEIGHT = 420;
@@ -9,11 +10,6 @@ const PLOT_HEIGHT = SVG_HEIGHT - MARGIN.top - MARGIN.bottom;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
-}
-
-function average(arr) {
-  if (!arr || arr.length === 0) return 0;
-  return arr.reduce((sum, v) => sum + v, 0) / arr.length;
 }
 
 function smoothArray(values, iterations = 1) {
@@ -444,6 +440,8 @@ export default function EditableBenchmarkCurve({
   const [saveName, setSaveName] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [messageTone, setMessageTone] = useState("info");
+  const [messageAutoDismissMs, setMessageAutoDismissMs] = useState(3000);
   const [draggingId, setDraggingId] = useState(null);
 
   const svgRef = useRef(null);
@@ -501,17 +499,6 @@ export default function EditableBenchmarkCurve({
     [anchors, editedCurve, originalCurve.length]
   );
 
-  const getLabelLayout = (anchor, index) => {
-    const nearRight = anchor.snappedIndex > originalCurve.length * 0.88;
-    const yOffset = index % 2 === 0 ? -16 : -30;
-
-    if (nearRight) {
-      return { dx: -10, dy: yOffset, anchor: "end" };
-    }
-
-    return { dx: 0, dy: yOffset, anchor: "middle" };
-  };
-
   const handlePointerMove = (event) => {
     if (!draggingId || !svgRef.current) return;
 
@@ -562,6 +549,12 @@ export default function EditableBenchmarkCurve({
 
   const stopDragging = () => setDraggingId(null);
 
+  const showMessage = (text, tone = "info", autoDismissMs = 3000) => {
+    setMessageTone(tone);
+    setMessageAutoDismissMs(autoDismissMs);
+    setMessage(text);
+  };
+
   useEffect(() => {
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", stopDragging);
@@ -575,7 +568,7 @@ export default function EditableBenchmarkCurve({
     const initialAnchors = detectProcessAnchors(originalCurve);
     setAnchors(initialAnchors);
     setEditedCurve(rebuildCurveWith2DDeformation(originalCurve, initialAnchors));
-    setMessage("Curve reset to original benchmark.");
+    showMessage("Curve reset to original benchmark.");
   };
 
   const handleSmooth = () => {
@@ -598,12 +591,12 @@ export default function EditableBenchmarkCurve({
       })
     );
 
-    setMessage("Smoothing applied.");
+    showMessage("Smoothing applied.");
   };
 
   const handleSave = async () => {
     if (!saveName.trim()) {
-      setMessage("Please enter a benchmark name before saving.");
+      showMessage("Please enter a benchmark name before saving.", "error", 0);
       return;
     }
 
@@ -629,18 +622,24 @@ export default function EditableBenchmarkCurve({
         sterilizer_id: sourceTagId,
         anchor_indices: snappedAnchors.map((a) => Math.round(a.snappedIndex)),
         anchor_values: snappedAnchors.map((a) => a.snappedValue),
-        adjusted_from: benchmark?.benchmark_name || null,
+        adjusted_from:
+          benchmark?.benchmark_id || benchmark?.database_id || null,
         adjusted_from_file_name: benchmark?.file_name || null,
       };
 
       const res = await api.post("/api/benchmarks/save-adjusted", payload);
 
-      setMessage("Adjusted benchmark saved successfully.");
+      showMessage("Adjusted benchmark saved successfully.", "success");
       if (onSaveSuccess) {
         onSaveSuccess(res.data);
       }
     } catch (err) {
-      setMessage(err?.response?.data?.detail || err.message || "Save failed.");
+      console.error("Adjusted benchmark save error:", err);
+      const message =
+        err?.response?.status && err.response.status < 500
+          ? err.response.data?.detail || "The adjusted benchmark could not be saved. Check the benchmark name and try again."
+          : "The adjusted benchmark could not be saved. Please try again.";
+      showMessage(message, "error", 0);
     } finally {
       setSaving(false);
     }
@@ -650,7 +649,7 @@ export default function EditableBenchmarkCurve({
     <div className="editable-benchmark-editor">
       <div className="editor-topbar">
         <div>
-          <h3 className="editor-title">Editable Benchmark Curve</h3>
+          <h3 className="editor-title">Adjust Benchmark Curve</h3>
           <p className="editor-subtitle">
             Drag the anchor points horizontally and vertically to adjust peak,
             valley, holding, and drop regions while preserving the original curve shape.
@@ -688,7 +687,12 @@ export default function EditableBenchmarkCurve({
         </div>
       </div>
 
-      {message && <div className="info-banner">{message}</div>}
+      <NotificationToast
+        message={message}
+        tone={messageTone}
+        autoDismissMs={messageAutoDismissMs}
+        onClose={() => setMessage("")}
+      />
 
       <div className="editable-chart-shell">
         <svg
@@ -715,7 +719,7 @@ export default function EditableBenchmarkCurve({
             textAnchor="middle"
             className="svg-axis-label"
           >
-            Normalised Cycle Progress
+            Normalized Cycle Progress
           </text>
 
           {yTicks.map((tick, idx) => {

@@ -102,8 +102,8 @@ def apply_structured_post_filter(
 
 def filter_stale_deleted_qdrant_rules(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    If an original/custom rule was deleted from JSON but an old Qdrant point still
-    exists, prevent that stale point from being used by RCA.
+    If an original/custom rule was deleted from Supabase but an old Qdrant point
+    still exists, prevent that stale point from being used by RCA.
     """
     try:
         from app.rag.custom_rule_service import get_active_rule_ids
@@ -127,10 +127,14 @@ def append_matching_json_rule_chunks(
     metric: Optional[str],
     pattern: Optional[str],
 ) -> List[Dict[str, Any]]:
-    """
-    Rules are indexed into Qdrant, but we also append matching rule chunks from
-    JSON directly. This guarantees edited/deleted/created rules are reflected
-    immediately without requiring the user to run a terminal chunking command.
+    """Merge current Supabase rules with vector results, preferring current data.
+
+    The previous implementation appended JSON after Qdrant and deduplicated by
+    ``chunk_id``.  If S2-005 was re-chunked after its recommendation changed,
+    the old vector payload could remain first (or coexist under an old hash),
+    so feedback received an empty ``recommendation_en`` even though the active
+    JSON rule contained it.  Rule IDs are the stable identity; current Supabase data is
+    now authoritative while vector/reranker scores are preserved when present.
     """
     try:
         from app.rag.custom_rule_service import get_matching_rule_chunks
@@ -143,16 +147,41 @@ def append_matching_json_rule_chunks(
     except Exception:
         json_chunks = []
 
-    output = []
+    def identity(chunk: Dict[str, Any]) -> str:
+        rule_id = str(chunk.get("rule_id") or "").strip().upper()
+        if rule_id:
+            return f"rule:{rule_id}"
+        chunk_id = str(chunk.get("chunk_id") or "").strip()
+        return f"chunk:{chunk_id}" if chunk_id else ""
+
+    vector_by_identity: Dict[str, Dict[str, Any]] = {}
+    for chunk in chunks or []:
+        key = identity(chunk)
+        if key and key not in vector_by_identity:
+            vector_by_identity[key] = dict(chunk)
+
+    output: List[Dict[str, Any]] = []
     seen = set()
 
-    for chunk in list(chunks or []) + list(json_chunks or []):
-        chunk_id = str(chunk.get("chunk_id") or chunk.get("rule_id") or "")
-        if chunk_id and chunk_id in seen:
+    # Supabase data comes first and overwrites stale payload fields.  Starting from the
+    # vector copy retains its similarity score for the fallback reranker.
+    for current in json_chunks or []:
+        key = identity(current)
+        merged = dict(vector_by_identity.get(key, {}))
+        merged.update(current)
+        output.append(merged)
+        if key:
+            seen.add(key)
+
+    # Keep vector-only non-rule/reference results which have no current JSON
+    # equivalent, but never add a second stale copy of the same rule ID.
+    for chunk in chunks or []:
+        key = identity(chunk)
+        if key and key in seen:
             continue
-        if chunk_id:
-            seen.add(chunk_id)
-        output.append(chunk)
+        output.append(dict(chunk))
+        if key:
+            seen.add(key)
 
     return output
 

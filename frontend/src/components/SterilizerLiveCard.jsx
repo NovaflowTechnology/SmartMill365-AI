@@ -1,4 +1,8 @@
 import ReactECharts from "echarts-for-react";
+import {
+  formatPlantDateTime,
+  plantDateTimeParts,
+} from "../utils/plantTime";
 
 function normaliseUnit(unit) {
   const value = String(unit || "bar").toLowerCase().trim();
@@ -14,16 +18,11 @@ function getYAxisConfig(unit) {
 }
 
 function formatDateTimeLabel(value, index) {
-  const date = new Date(value);
-  const pad = (n) => String(n).padStart(2, "0");
+  const parts = plantDateTimeParts(value);
+  if (!parts) return "";
+  const { year, month, day, hour: hours, minute: minutes } = parts;
 
-  const year = date.getFullYear();
-  const month = pad(date.getMonth() + 1);
-  const day = pad(date.getDate());
-  const hours = pad(date.getHours());
-  const minutes = pad(date.getMinutes());
-
-  if (index === 0 || (date.getHours() === 0 && date.getMinutes() === 0)) {
+  if (index === 0 || (hours === "00" && minutes === "00")) {
     return `${year}-${month}-${day}\n${hours}:${minutes}`;
   }
 
@@ -45,10 +44,8 @@ function getStatusLabel(status) {
   return "No Data";
 }
 
-export default function SterilizerLiveCard({ sterilizer, unit = "bar" }) {
+export default function SterilizerLiveCard({ sterilizer, unit = "bar", compact = false }) {
   const points = sterilizer?.points || [];
-  const cycles = sterilizer?.cycles || [];
-  const latestValue = sterilizer?.latest_value;
   const status = sterilizer?.status || "no_data";
   const cleanUnit = normaliseUnit(unit);
   const yAxisConfig = getYAxisConfig(cleanUnit);
@@ -57,34 +54,50 @@ export default function SterilizerLiveCard({ sterilizer, unit = "bar" }) {
     tooltip: {
       trigger: "axis",
       backgroundColor: "rgba(255,255,255,0.98)",
-      borderColor: "#e2e8f0",
-      textStyle: { color: "#1e293b" },
+      borderColor: "#b8c5ce",
+      textStyle: { color: "#172734" },
       formatter: (params) => {
         const item = params?.[0];
         if (!item) return "";
-        const time = new Date(item.axisValue).toLocaleString();
+        const time = formatPlantDateTime(item.axisValue);
         const value = Number(item.data?.[1]);
         return `${time}<br/>Pressure: ${Number.isFinite(value) ? value.toFixed(2) : "-"} ${cleanUnit}`;
       },
     },
 
     grid: {
-      left: 90,
-      right: 26,
-      top: 42,
-      bottom: 58,
+      left: compact ? 58 : 90,
+      right: compact ? 14 : 26,
+      top: compact ? 18 : 42,
+      bottom: compact ? 44 : 84,
       containLabel: false,
     },
+
+    dataZoom: [
+      { type: "inside" },
+      {
+        type: "slider",
+        bottom: compact ? 2 : 6,
+        height: compact ? 11 : 18,
+        borderColor: "#afbec9",
+        fillerColor: "rgba(47, 111, 143, 0.14)",
+        dataBackground: {
+          lineStyle: { color: "#7fa3b5", opacity: 0.8 },
+          areaStyle: { color: "#dbe7ec", opacity: 0.55 },
+        },
+      },
+    ],
 
     xAxis: {
       type: "time",
       axisLabel: {
-        color: "#64748b",
+        color: "#5d6d79",
         formatter: formatDateTimeLabel,
-        hideOverlap: false,
-        margin: 12,
+        hideOverlap: compact,
+        margin: compact ? 6 : 12,
+        fontSize: compact ? 10 : 12,
       },
-      axisLine: { lineStyle: { color: "#94a3b8" } },
+      axisLine: { lineStyle: { color: "#9aabb6" } },
       axisTick: { show: true },
       splitLine: { show: false },
     },
@@ -95,11 +108,12 @@ export default function SterilizerLiveCard({ sterilizer, unit = "bar" }) {
       max: yAxisConfig.max,
       interval: yAxisConfig.interval,
       axisLabel: {
-        color: "#64748b",
+        color: "#5d6d79",
         formatter: yAxisConfig.formatter,
+        fontSize: compact ? 10 : 12,
       },
-      axisLine: { show: true, lineStyle: { color: "#94a3b8" } },
-      splitLine: { lineStyle: { type: "dashed", color: "#e2e8f0" } },
+      axisLine: { show: true, lineStyle: { color: "#9aabb6" } },
+      splitLine: { lineStyle: { type: "dashed", color: "#dce4e9" } },
     },
 
     series: [
@@ -108,14 +122,14 @@ export default function SterilizerLiveCard({ sterilizer, unit = "bar" }) {
         type: "line",
         showSymbol: false,
         z: 3,
-        lineStyle: { width: 2.5, type: "solid", color: "#2563eb" },
+        lineStyle: { width: compact ? 2 : 2.5, type: "solid", color: "#2f6f8f" },
         data: points.map((p) => [p.time, p.raw]),
       },
     ],
   };
 
   return (
-    <div className="dash-card live-card">
+    <div className={`dash-card live-card ${compact ? "compact-live-card" : ""}`}>
       <div className="live-card-header">
         <div>
           <div className="live-card-title">{sterilizer.sterilizer_name}</div>
@@ -126,60 +140,32 @@ export default function SterilizerLiveCard({ sterilizer, unit = "bar" }) {
         </span>
       </div>
 
-      {sterilizer?.error && <div className="info-banner">{sterilizer.error}</div>}
-
-      <div className="live-mini-stats">
-        <div className="live-stat-box">
-          <div className="live-stat-label">Latest Value</div>
-          <div className="live-stat-value">
-            {latestValue == null ? "-" : `${Number(latestValue).toFixed(2)} ${cleanUnit}`}
-          </div>
-        </div>
-
-        <div className="live-stat-box">
-          <div className="live-stat-label">Detected Cycles</div>
-          <div className="live-stat-value">{cycles.length}</div>
-        </div>
-      </div>
+      {sterilizer?.error && points.length > 0 && (
+        <div className="info-banner compact-live-warning">{sterilizer.error}</div>
+      )}
 
       {points.length > 0 ? (
-        <div style={{ width: "100%", height: 430, position: "relative" }}>
-          <div
-            style={{
-              position: "absolute",
-              top: 10,
-              left: 92,
-              zIndex: 2,
-              fontSize: 13,
-              fontWeight: 700,
-              color: "#64748b",
-              pointerEvents: "none",
-            }}
-          >
+        <div className="live-chart-section">
+          <div className="live-chart-container">
+          <div className="live-chart-unit-label">
             {cleanUnit}
           </div>
 
-          <div
-            style={{
-              position: "absolute",
-              left: 18,
-              top: "46%",
-              zIndex: 2,
-              transform: "translateY(-50%) rotate(-90deg)",
-              transformOrigin: "center",
-              fontSize: 14,
-              fontWeight: 700,
-              color: "#64748b",
-              pointerEvents: "none",
-            }}
-          >
+          <div className="live-chart-axis-label">
             Pressure
           </div>
 
-          <ReactECharts option={option} style={{ height: "100%" }} notMerge={true} />
+            <ReactECharts
+              option={option}
+              style={{ height: "100%", width: "100%" }}
+              notMerge={true}
+            />
+          </div>
         </div>
       ) : (
-        <div className="empty-state">No live data available for this sterilizer.</div>
+        <div className="empty-state compact-live-empty">
+          {sterilizer?.error || "No live data available for this sterilizer."}
+        </div>
       )}
     </div>
   );

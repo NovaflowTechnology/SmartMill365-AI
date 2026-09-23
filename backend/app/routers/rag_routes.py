@@ -1,8 +1,9 @@
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.error_handling import raise_http_error
 from app.rag.indexer import index_rca_chunks
 from app.rag.rca_pipeline import run_rca_feedback_pipeline
 
@@ -20,7 +21,7 @@ def reindex_rca_knowledge_base(recreate: bool = True):
     try:
         return index_rca_chunks(recreate=recreate)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise_http_error(exc)
 
 
 @router.post("/feedback")
@@ -31,4 +32,4 @@ def generate_rca_feedback(request: RcaFeedbackRequest):
             peer_confirmation_available=request.peer_confirmation_available,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise_http_error(exc)

@@ -5,10 +5,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from app.services.influx_service import fetch_multi_field_data
+from app.services.influx_service import fetch_multi_field_data, get_pressure_source
 from app.services.signal_service import prepare_signal
 from app.services.cycle_service import detect_full_cycles, refine_cycle_boundaries
-from app.services.sterilizer_mapping import get_sterilizers_for_tag
+from app.services.sterilizer_mapping import (
+    get_auxiliary_channels_for_tag,
+    get_sterilizers_for_tag,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -91,10 +94,12 @@ def _overlap_seconds(
     return max(0.0, overlap)
 
 
-def _get_peer_fields(tag_id: str, selected_field: str) -> List[Dict[str, str]]:
+def _get_peer_fields(
+    tag_id: str, selected_field: str, source_unit: str
+) -> List[Dict[str, str]]:
     peers: List[Dict[str, str]] = []
 
-    for item in get_sterilizers_for_tag(tag_id):
+    for item in get_sterilizers_for_tag(tag_id, source_unit=source_unit):
         field = str(item.get("field") or "").strip()
         if field and field != selected_field:
             peers.append(
@@ -203,13 +208,19 @@ def _prepare_field_signal(
     return prepared_df, float(baseline_value), float(baseline_margin), float(dynamic_range)
 
 
-def _nearest_value(df: pd.DataFrame, target_time: datetime) -> Optional[float]:
+def _nearest_value(
+    df: pd.DataFrame,
+    target_time: datetime,
+    value_col: str = "smooth",
+) -> Optional[float]:
     if df.empty:
         return None
 
     times = pd.to_datetime(df["time"])
     idx = (times - pd.Timestamp(target_time)).abs().idxmin()
-    return _safe_float(df.loc[idx, "smooth"])
+    if value_col not in df.columns:
+        return None
+    return _safe_float(df.loc[idx, value_col])
 
 
 def _window_stats(
@@ -259,6 +270,38 @@ def _window_stats(
     mid_value = _nearest_value(df, window_start + (window_end - window_start) / 2)
     end_value = _nearest_value(df, window_end)
 
+    source_unit = None
+    benchmark_unit = None
+    raw_stats: Dict[str, Any] = {}
+    if "source_unit" in window_df.columns:
+        units = window_df["source_unit"].dropna().astype(str).unique().tolist()
+        source_unit = units[0] if units else None
+    if "benchmark_unit" in window_df.columns:
+        units = window_df["benchmark_unit"].dropna().astype(str).unique().tolist()
+        benchmark_unit = units[0] if units else None
+    if "value" in window_df.columns:
+        raw_values = window_df["value"].astype(float)
+        raw_stats = {
+            "raw_min_pressure": round(float(raw_values.min()), 4),
+            "raw_mean_pressure": round(float(raw_values.mean()), 4),
+            "raw_max_pressure": round(float(raw_values.max()), 4),
+            "raw_start_pressure": (
+                round(_nearest_value(df, window_start, "value"), 4)
+                if _nearest_value(df, window_start, "value") is not None
+                else None
+            ),
+            "raw_mid_pressure": (
+                round(_nearest_value(df, window_start + (window_end - window_start) / 2, "value"), 4)
+                if _nearest_value(df, window_start + (window_end - window_start) / 2, "value") is not None
+                else None
+            ),
+            "raw_end_pressure": (
+                round(_nearest_value(df, window_end, "value"), 4)
+                if _nearest_value(df, window_end, "value") is not None
+                else None
+            ),
+        }
+
     return {
         "available": True,
         "window_start": _iso(window_start),
@@ -278,6 +321,76 @@ def _window_stats(
         "active_seconds_estimated": round(float(active_mask.mean()) * max(0.0, (window_end - window_start).total_seconds()), 2),
         "max_positive_slope": round(float(max_positive_slope), 6),
         "mean_positive_slope": round(float(mean_positive_slope), 6),
+        "source_unit": source_unit,
+        "benchmark_unit": benchmark_unit,
+        **raw_stats,
+    }
+
+
+def _pressure_condition_from_stats(stats: Dict[str, Any]) -> str:
+    """Describe whether a peer is active and whether its pressure is rising."""
+    if not stats.get("available"):
+        return "pressure data unavailable"
+
+    active_ratio = _safe_float(stats.get("active_ratio"), 0.0) or 0.0
+    if active_ratio >= 0.65:
+        activity = "active through most of the affected stage"
+    elif active_ratio >= 0.10:
+        activity = "partly active during the affected stage"
+    else:
+        activity = "mostly inactive during the affected stage"
+
+    # Analytical classification stays in canonical bar, independent of display unit.
+    start = _safe_float(stats.get("start_pressure"))
+    end = _safe_float(stats.get("end_pressure"))
+    minimum = _safe_float(stats.get("min_pressure"))
+    maximum = _safe_float(stats.get("max_pressure"))
+
+    if start is None or end is None:
+        trend = "with an undetermined pressure trend"
+    else:
+        span = max((maximum or start) - (minimum or start), 0.0)
+        tolerance = max(span * 0.08, 0.05)
+        change = end - start
+        if change > tolerance:
+            trend = "with pressure rising"
+        elif change < -tolerance:
+            trend = "with pressure falling"
+        else:
+            trend = "with pressure relatively stable"
+
+    return f"{activity}, {trend}"
+
+
+def _build_peer_pressure_condition(
+    stats: Dict[str, Any],
+    *,
+    active_during_cycle: bool,
+    ramp_detected: bool,
+    shared_event_detected: bool,
+) -> Dict[str, Any]:
+    """Build a compact, display-ready peer pressure record."""
+    return {
+        "field": stats.get("field"),
+        "sterilizer_name": stats.get("sterilizer_name"),
+        "available": bool(stats.get("available")),
+        "window_start": stats.get("window_start"),
+        "window_end": stats.get("window_end"),
+        "source_unit": stats.get("source_unit"),
+        "benchmark_unit": stats.get("benchmark_unit"),
+        "min_pressure": stats.get("raw_min_pressure", stats.get("min_pressure")),
+        "mean_pressure": stats.get("raw_mean_pressure", stats.get("mean_pressure")),
+        "max_pressure": stats.get("raw_max_pressure", stats.get("max_pressure")),
+        "start_pressure": stats.get("raw_start_pressure", stats.get("start_pressure")),
+        "end_pressure": stats.get("raw_end_pressure", stats.get("end_pressure")),
+        "active_ratio": stats.get("active_ratio"),
+        "pressure_condition": _pressure_condition_from_stats(stats),
+        "active_during_cycle": bool(active_during_cycle),
+        "active_during_affected_stage": bool(
+            (_safe_float(stats.get("active_ratio"), 0.0) or 0.0) >= 0.10
+        ),
+        "ramp_detected_during_affected_stage": bool(ramp_detected),
+        "shared_pressure_event_detected": bool(shared_event_detected),
     }
 
 
@@ -327,6 +440,11 @@ def _detect_ramp_events_from_pressure(
 
     for idx, row in df.iterrows():
         pressure = float(row["smooth"])
+        display_pressure = (
+            float(row["value"])
+            if "value" in row and pd.notna(row["value"])
+            else pressure
+        )
         slope = float(row["slope"])
         current_time = row["time"]
 
@@ -339,6 +457,11 @@ def _detect_ramp_events_from_pressure(
             # noisy point being treated as ramp.
             local = df.iloc[max(0, idx - 2) : min(len(df), idx + 5)]
             local_increase = float(local["smooth"].max() - local["smooth"].min())
+            display_local_increase = (
+                float(local["value"].max() - local["value"].min())
+                if "value" in local.columns and not local["value"].dropna().empty
+                else local_increase
+            )
 
             if local_increase >= max(dynamic_range * 0.08, baseline_margin * 0.35):
                 events.append(
@@ -346,9 +469,16 @@ def _detect_ramp_events_from_pressure(
                         "field": field,
                         "sterilizer_name": sterilizer_name,
                         "ramp_start_time": current_time.isoformat(),
-                        "ramp_start_pressure": round(pressure, 4),
+                        "ramp_start_pressure": round(display_pressure, 4),
                         "slope_at_start": round(slope, 6),
-                        "local_pressure_increase": round(local_increase, 4),
+                        "local_pressure_increase": round(display_local_increase, 4),
+                        "pressure_unit": (
+                            str(df["source_unit"].dropna().iloc[0])
+                            if "source_unit" in df.columns and not df["source_unit"].dropna().empty
+                            else str(df["benchmark_unit"].dropna().iloc[0])
+                            if "benchmark_unit" in df.columns and not df["benchmark_unit"].dropna().empty
+                            else None
+                        ),
                         "detection_method": "pressure_transition_or_positive_slope",
                     }
                 )
@@ -392,8 +522,6 @@ def _build_cycle_records_for_field(
             cycles_idx,
             baseline_value,
             baseline_margin,
-            search_points=40,
-            stable_points=5,
         )
     except Exception:
         return records
@@ -458,16 +586,39 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
 
     metrics = scoring_result.get("metrics") or {}
 
-    bucket = _get_context_value(scoring_result, metrics, "bucket")
-    measurement = _get_context_value(scoring_result, metrics, "measurement")
+    requested_bucket = _get_context_value(scoring_result, metrics, "bucket")
     tag_id = _get_context_value(scoring_result, metrics, "tag_id")
     selected_field = _get_context_value(scoring_result, metrics, "field")
-    source_unit = _get_context_value(scoring_result, metrics, "source_unit")
+    source_unit = _get_context_value(scoring_result, metrics, "source_unit") or "bar"
     smooth_window = int(_safe_float(_get_context_value(scoring_result, metrics, "smooth_window"), 9) or 9)
 
     cycle_start = _parse_dt(_get_context_value(scoring_result, metrics, "cycle_start"))
     cycle_end = _parse_dt(_get_context_value(scoring_result, metrics, "cycle_end"))
     selected_stage = metrics.get("user_selected_stage") or metrics.get("affected_stage")
+
+    try:
+        source = get_pressure_source(source_unit, requested_bucket=requested_bucket)
+        bucket = source["bucket"]
+        measurement = source["measurement"]
+        source_unit = source["source_unit"]
+    except Exception as exc:
+        return {
+            "available": False,
+            "evidence_level": "not_available",
+            "reason": f"Evidence source configuration is unavailable: {exc}",
+            "summary_lines": [f"Evidence source configuration is unavailable: {exc}"],
+            "selected_context": {
+                "tag_id": tag_id,
+                "field": selected_field,
+                "source_unit": source_unit,
+            },
+            "selected_pressure_time_evidence": {},
+            "auxiliary_pressure_evidence": {},
+            "peer_sterilizer_evidence": {},
+            "competition_evidence": {},
+            "pressure_time_evidence": {},
+            "confirmation_flags": {},
+        }
 
     evidence: Dict[str, Any] = {
         "available": False,
@@ -476,6 +627,7 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
         "selected_context": {
             "bucket": bucket,
             "measurement": measurement,
+            "source_unit": source_unit,
             "tag_id": tag_id,
             "field": selected_field,
             "cycle_start": _iso(cycle_start),
@@ -483,11 +635,13 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
             "selected_stage": selected_stage,
         },
         "selected_pressure_time_evidence": {},
+        "auxiliary_pressure_evidence": {},
         "peer_sterilizer_evidence": {
             "active_peer_count": 0,
             "active_peers": [],
             "overlapping_peer_count": 0,
             "overlapping_peers": [],
+            "affected_stage_pressure_conditions": [],
         },
         "competition_evidence": {
             "confirmed": False,
@@ -508,6 +662,8 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
             "competition_confirmation_available": False,
             "local_confirmation_available": False,
             "boiler_or_system_confirmation_available": False,
+            "boiler_pressure_evidence_available": False,
+            "bpv_pressure_evidence_available": False,
         },
         "summary_lines": [],
         "debug": {},
@@ -516,8 +672,6 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
     missing = [
         name
         for name, value in {
-            "bucket": bucket,
-            "measurement": measurement,
             "tag_id": tag_id,
             "field": selected_field,
             "cycle_start": cycle_start,
@@ -531,14 +685,17 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
         evidence["summary_lines"].append(evidence["reason"])
         return evidence
 
-    peer_items = _get_peer_fields(str(tag_id), str(selected_field))
+    peer_items = _get_peer_fields(str(tag_id), str(selected_field), source_unit)
     peer_fields = [item["field"] for item in peer_items]
     peer_name_by_field = {item["field"]: item["sterilizer_name"] for item in peer_items}
-
-    if not peer_fields:
-        evidence["reason"] = "No peer sterilizer channels are configured for this tag."
-        evidence["summary_lines"].append(evidence["reason"])
-        return evidence
+    auxiliary_channels = get_auxiliary_channels_for_tag(
+        str(tag_id), source_unit=source_unit
+    )
+    auxiliary_fields = [
+        str(item.get("field"))
+        for item in auxiliary_channels.values()
+        if item.get("field")
+    ]
 
     selected_stage_start, selected_stage_end, window_source = _infer_selected_stage_window(
         cycle_start=cycle_start,
@@ -550,7 +707,7 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
     query_start = cycle_start - timedelta(minutes=30)
     query_end = cycle_end + timedelta(minutes=30)
 
-    all_fields = [str(selected_field)] + peer_fields
+    all_fields = list(dict.fromkeys([str(selected_field)] + peer_fields + auxiliary_fields))
 
     evidence["selected_context"].update(
         {
@@ -558,6 +715,7 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
             "selected_stage_window_end": _iso(selected_stage_end),
             "selected_stage_window_source": window_source,
             "peer_fields_checked": peer_fields,
+            "auxiliary_fields_checked": auxiliary_fields,
             "query_start": _iso(query_start),
             "query_end": _iso(query_end),
         }
@@ -622,6 +780,41 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
             "stage_window_stats": selected_stats,
         }
 
+    auxiliary_pressure_evidence: Dict[str, Dict[str, Any]] = {}
+    for cause_key, channel in auxiliary_channels.items():
+        auxiliary_field = str(channel.get("field") or "")
+        display_name = str(channel.get("display_name") or cause_key.upper())
+        auxiliary_data = prepared_by_field.get(auxiliary_field) or {}
+        auxiliary_df = auxiliary_data.get("prepared_df")
+
+        if auxiliary_df is None:
+            auxiliary_pressure_evidence[cause_key] = {
+                "field": auxiliary_field,
+                "display_name": display_name,
+                "available": False,
+                "reason": auxiliary_data.get("error") or "No pressure data was available for this equipment channel.",
+            }
+            continue
+
+        auxiliary_stats = _window_stats(
+            auxiliary_df,
+            selected_stage_start,
+            selected_stage_end,
+            auxiliary_data["baseline"],
+            auxiliary_data["margin"],
+            auxiliary_data["dynamic_range"],
+        )
+        auxiliary_pressure_evidence[cause_key] = {
+            "field": auxiliary_field,
+            "display_name": display_name,
+            "available": bool(auxiliary_stats.get("available")),
+            "stage_window_stats": auxiliary_stats,
+            "pressure_condition": _pressure_condition_from_stats(auxiliary_stats),
+            "interpretation": "raw_observation_only_no_reference_threshold",
+        }
+
+    evidence["auxiliary_pressure_evidence"] = auxiliary_pressure_evidence
+
     active_peers: List[Dict[str, Any]] = []
     overlapping_peers: List[Dict[str, Any]] = []
     concurrent_ramp_peers: List[Dict[str, Any]] = []
@@ -674,8 +867,10 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
                     "field": peer_field,
                     "sterilizer_name": peer_name,
                     "stage_overlap_seconds_estimated": stats.get("active_seconds_estimated"),
-                    "mean_pressure": stats.get("mean_pressure"),
-                    "max_pressure": stats.get("max_pressure"),
+                    "mean_pressure": stats.get("raw_mean_pressure", stats.get("mean_pressure")),
+                    "max_pressure": stats.get("raw_max_pressure", stats.get("max_pressure")),
+                    "source_unit": stats.get("source_unit"),
+                    "benchmark_unit": stats.get("benchmark_unit"),
                     "active_ratio": stats.get("active_ratio"),
                     "evidence_source": "pressure_time_values_in_selected_stage_window",
                 }
@@ -696,8 +891,10 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
                     "field": peer_field,
                     "sterilizer_name": peer_name,
                     "active_seconds_estimated": cycle_stats.get("active_seconds_estimated"),
-                    "mean_pressure": cycle_stats.get("mean_pressure"),
-                    "max_pressure": cycle_stats.get("max_pressure"),
+                    "mean_pressure": cycle_stats.get("raw_mean_pressure", cycle_stats.get("mean_pressure")),
+                    "max_pressure": cycle_stats.get("raw_max_pressure", cycle_stats.get("max_pressure")),
+                    "source_unit": cycle_stats.get("source_unit"),
+                    "benchmark_unit": cycle_stats.get("benchmark_unit"),
                     "active_ratio": cycle_stats.get("active_ratio"),
                     "evidence_source": "pressure_time_values_in_selected_cycle_window",
                 }
@@ -758,17 +955,50 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
     concurrent_ramp_count = len({item.get("field") for item in concurrent_ramp_peers})
     shared_pressure_event_count = len(shared_pressure_event_peers)
 
+    active_fields = {str(item.get("field")) for item in active_peers}
+    ramp_fields = {str(item.get("field")) for item in concurrent_ramp_peers}
+    shared_fields = {str(item.get("field")) for item in shared_pressure_event_peers}
+
+    peer_pressure_conditions: List[Dict[str, Any]] = []
+    for peer_stats in peer_window_stats:
+        if not peer_stats.get("available"):
+            continue
+        field = str(peer_stats.get("field") or "")
+        condition = _build_peer_pressure_condition(
+            peer_stats,
+            active_during_cycle=field in active_fields,
+            ramp_detected=field in ramp_fields,
+            shared_event_detected=field in shared_fields,
+        )
+        # Keep peers that were active in the selected cycle or affected stage,
+        # or that produced a shared/ramp event. These are the peers relevant to
+        # the operator's explanation.
+        if (
+            condition["active_during_cycle"]
+            or condition["active_during_affected_stage"]
+            or condition["ramp_detected_during_affected_stage"]
+            or condition["shared_pressure_event_detected"]
+        ):
+            peer_pressure_conditions.append(condition)
+
     evidence["peer_sterilizer_evidence"] = {
         "active_peer_count": active_peer_count,
         "active_peers": active_peers,
         "overlapping_peer_count": overlapping_peer_count,
         "overlapping_peers": overlapping_peers,
+        "affected_stage_pressure_conditions": peer_pressure_conditions,
     }
 
     evidence["competition_evidence"] = {
         "confirmed": concurrent_ramp_count >= 1,
         "concurrent_ramp_count": concurrent_ramp_count,
         "concurrent_ramp_peers": concurrent_ramp_peers,
+        "competitor_pressure_conditions": [
+            item
+            for item in peer_pressure_conditions
+            if item.get("active_during_affected_stage")
+            or item.get("ramp_detected_during_affected_stage")
+        ],
         "window_minutes": 5,
         "pressure_value_based": True,
     }
@@ -782,7 +1012,15 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
 
     pressure_value_evidence_available = bool(
         evidence.get("selected_pressure_time_evidence", {}).get("stage_window_stats", {}).get("available")
-        or peer_window_stats
+        or any(item.get("available") for item in peer_window_stats)
+        or any(item.get("available") for item in auxiliary_pressure_evidence.values())
+    )
+
+    boiler_pressure_available = bool(
+        auxiliary_pressure_evidence.get("boiler", {}).get("available")
+    )
+    bpv_pressure_available = bool(
+        auxiliary_pressure_evidence.get("bpv", {}).get("available")
     )
 
     evidence["confirmation_flags"] = {
@@ -791,14 +1029,20 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
         "competition_confirmation_available": concurrent_ramp_count >= 1,
         "local_confirmation_available": active_peer_count == 0 and concurrent_ramp_count == 0 and shared_pressure_event_count == 0,
         "boiler_or_system_confirmation_available": shared_pressure_event_count >= 2 or overlapping_peer_count >= 2,
+        "boiler_pressure_evidence_available": boiler_pressure_available,
+        "bpv_pressure_evidence_available": bpv_pressure_available,
     }
 
     selected_stats = evidence.get("selected_pressure_time_evidence", {}).get("stage_window_stats") or {}
     if selected_stats.get("available"):
+        selected_unit = selected_stats.get("source_unit") or selected_stats.get("benchmark_unit") or "pressure units"
+        selected_min = selected_stats.get("raw_min_pressure", selected_stats.get("min_pressure"))
+        selected_max = selected_stats.get("raw_max_pressure", selected_stats.get("max_pressure"))
+        selected_mean = selected_stats.get("raw_mean_pressure", selected_stats.get("mean_pressure"))
         evidence["summary_lines"].append(
             "Selected pressure-time evidence: "
-            f"during the selected stage window, pressure ranged from {selected_stats.get('min_pressure')} "
-            f"to {selected_stats.get('max_pressure')} with mean {selected_stats.get('mean_pressure')}."
+            f"during the selected stage window, pressure ranged from {selected_min} {selected_unit} "
+            f"to {selected_max} {selected_unit} with mean {selected_mean} {selected_unit}."
         )
 
     if active_peer_count > 0:
@@ -815,6 +1059,16 @@ def collect_peer_competition_evidence(scoring_result: Dict[str, Any]) -> Dict[st
         names = ", ".join(sorted({str(item.get("sterilizer_name")) for item in overlapping_peers}))
         evidence["summary_lines"].append(
             f"Stage-window peer evidence: {overlapping_peer_count} peer sterilizer(s) had pressure values above baseline during the selected stage window: {names}."
+        )
+
+    for condition in peer_pressure_conditions[:4]:
+        unit = condition.get("source_unit") or condition.get("benchmark_unit") or "pressure units"
+        evidence["summary_lines"].append(
+            f"Peer pressure condition: {condition.get('sterilizer_name')} was "
+            f"{condition.get('pressure_condition')} from {condition.get('window_start')} "
+            f"to {condition.get('window_end')}; pressure minimum {condition.get('min_pressure')} {unit}, "
+            f"mean {condition.get('mean_pressure')} {unit}, maximum {condition.get('max_pressure')} {unit}, "
+            f"start {condition.get('start_pressure')} {unit}, and end {condition.get('end_pressure')} {unit}."
         )
 
     if concurrent_ramp_count > 0:

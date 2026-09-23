@@ -6,6 +6,12 @@ from app.rag.rag_config import get_rag_settings
 
 
 def _load_json_list(path: Path) -> List[Dict[str, Any]]:
+    """Load an explicit JSON seed/backup file.
+
+    Normal runtime indexing no longer uses these files as the source of truth;
+    they remain useful for one-time migration and offline regeneration.
+    """
+
     if not path.exists():
         raise FileNotFoundError(
             f"RCA chunks file not found: {path}. "
@@ -22,24 +28,18 @@ def _load_json_list(path: Path) -> List[Dict[str, Any]]:
 
 
 def load_rca_chunks(path: str | Path | None = None, include_custom: bool = True) -> List[Dict[str, Any]]:
-    settings = get_rag_settings()
-    chunk_path = Path(path) if path else Path(settings["chunks_path"])
-    chunks = _load_json_list(chunk_path)
+    """Load RCA chunks for indexing.
 
-    if include_custom and path is None:
-        try:
-            from app.rag.custom_rule_service import get_custom_chunks
+    With no explicit path, Supabase-backed Analysis rules are authoritative and
+    both original and custom chunks are rebuilt from there. Passing ``path`` is
+    reserved for migration/offline tooling that intentionally reads a JSON file.
+    """
 
-            custom_chunks = get_custom_chunks()
-            existing_ids = {str(chunk.get("chunk_id")) for chunk in chunks}
-            for chunk in custom_chunks:
-                chunk_id = str(chunk.get("chunk_id"))
-                if chunk_id and chunk_id not in existing_ids:
-                    chunks.append(chunk)
-                    existing_ids.add(chunk_id)
-        except Exception:
-            # Reindexing original Excel rules should not fail just because the
-            # optional custom rule JSON file is missing or temporarily invalid.
-            pass
+    if path is not None:
+        return _load_json_list(Path(path))
 
-    return chunks
+    from app.rag.custom_rule_service import get_all_chunks_for_indexing, load_base_chunks
+
+    if include_custom:
+        return get_all_chunks_for_indexing()
+    return load_base_chunks()

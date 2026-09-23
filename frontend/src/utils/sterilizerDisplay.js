@@ -1,71 +1,3 @@
-const TAG_STERILIZER_DISPLAY_MAP = {
-  SAMYSK_PSTR_240004: {
-    tagName: "SKPG",
-    unit: "psi",
-    sterilizers: {
-      ch2: "Sterilizer-1",
-      ch3: "Sterilizer-2",
-      ch4: "Sterilizer-3",
-      ch5: "Sterilizer-4",
-    },
-  },
-
-  SAMYSK_PSTR_250041: {
-    tagName: "SKSPAD",
-    unit: "bar",
-    sterilizers: {
-      ch2: "Sterilizer-1",
-      ch3: "Sterilizer-2",
-      ch4: "Sterilizer-3",
-      ch5: "Sterilizer-4",
-    },
-  },
-
-  SAMYSK_PSTR_240014: {
-    tagName: "SKRSB",
-    unit: "psi",
-    sterilizers: {
-      ch3: "Sterilizer-1",
-      ch4: "Sterilizer-2",
-      ch5: "Sterilizer-3",
-      ch6: "Sterilizer-4",
-      ch7: "Sterilizer-5",
-    },
-  },
-
-  SAMYSK_PSTR_240006: {
-    tagName: "SKRHL",
-    unit: "bar",
-    sterilizers: {
-      ch3: "Sterilizer-1",
-      ch4: "Sterilizer-2",
-    },
-  },
-
-  SAMYSK_PSTR_250036: {
-    tagName: "SKBAR",
-    unit: "psi",
-    sterilizers: {
-      ch3: "Sterilizer-1",
-      ch4: "Sterilizer-2",
-      ch5: "Sterilizer-3",
-      ch6: "Sterilizer-4",
-      ch7: "Sterilizer-5",
-      ch8: "Sterilizer-6",
-    },
-  },
-
-  SAMYSK_PSTR_250024: {
-    tagName: "SKMJ",
-    unit: "psi",
-    sterilizers: {
-      ch3: "Sterilizer-1",
-      ch4: "Sterilizer-2",
-      ch5: "Sterilizer-3",
-    },
-  },
-};
-
 function cleanValue(value) {
   if (value === null || value === undefined) return "";
   return String(value).trim();
@@ -79,7 +11,7 @@ function normaliseName(value) {
 }
 
 function isKnownTagId(value) {
-  return Boolean(TAG_STERILIZER_DISPLAY_MAP[cleanValue(value)]);
+  return Boolean(cleanValue(value));
 }
 
 function getRawBenchmarkTagId(benchmark) {
@@ -101,42 +33,34 @@ function getRawBenchmarkTagId(benchmark) {
    BASIC STERILIZER DISPLAY HELPERS
 ========================================================= */
 
-export function getSterilizerDisplayName(tagId, field) {
+export function getSterilizerDisplayName(tagId, field, plantDisplayName = "") {
   const cleanTagId = cleanValue(tagId);
+  const cleanPlantName = cleanValue(plantDisplayName);
   const cleanField = cleanValue(field);
 
-  const tagInfo = TAG_STERILIZER_DISPLAY_MAP[cleanTagId];
-
-  if (!tagInfo) {
-    if (!cleanTagId) return "No sterilizer selected";
-    return `${cleanTagId}${cleanField ? ` [${cleanField}]` : ""}`;
-  }
-
-  const sterilizerName = tagInfo.sterilizers[cleanField];
-
-  if (!sterilizerName) {
-    return `${tagInfo.tagName}${cleanField ? ` [${cleanField}]` : ""}`;
-  }
-
-  return `${tagInfo.tagName} [${sterilizerName}]`;
+  if (!cleanTagId) return "No sterilizer selected";
+  const plantIdentity = cleanPlantName && cleanPlantName !== cleanTagId
+    ? `${cleanPlantName} (${cleanTagId})`
+    : cleanTagId;
+  const sterilizerName = getSterilizerName(cleanTagId, cleanField);
+  return sterilizerName && sterilizerName !== "-"
+    ? `${plantIdentity} [${sterilizerName}]`
+    : plantIdentity;
 }
 
 export function getTagShortName(tagId) {
   const cleanTagId = cleanValue(tagId);
-  return TAG_STERILIZER_DISPLAY_MAP[cleanTagId]?.tagName || cleanTagId || "-";
+  return cleanTagId || "-";
 }
 
 export function getSterilizerName(tagId, field) {
-  const cleanTagId = cleanValue(tagId);
+  void tagId;
   const cleanField = cleanValue(field);
 
   if (!cleanField) return "-";
 
-  const tagInfo = TAG_STERILIZER_DISPLAY_MAP[cleanTagId];
-
-  if (!tagInfo) return cleanField;
-
-  return tagInfo.sterilizers[cleanField] || cleanField;
+  const match = /^stp(\d+)$/i.exec(cleanField);
+  return match ? `Sterilizer ${Number(match[1])}` : cleanField;
 }
 
 /* =========================================================
@@ -144,10 +68,10 @@ export function getSterilizerName(tagId, field) {
 
    Purpose:
    Show:
-   SKPG, Sterilizer-3
+   SAMYSK_POM_240004, Sterilizer 3
 
    Instead of:
-   SAMYSK_PSTR_240004, ch4
+   SAMYSK_POM_240004, stp3
 
    Important:
    Older adjusted benchmarks may not store id / sterilizer_id.

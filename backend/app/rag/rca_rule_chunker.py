@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import hashlib
 import json
 import re
+import unicodedata
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +30,17 @@ def clean_text(value: Any) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
+
+
+def normalise_lookup_key(value: Any) -> str:
+    """Return a stable key for joins between different Excel sheets.
+
+    Excel keys can look identical in the workbook while containing different
+    dash characters, spacing, case, or non-breaking spaces.  Comparing the raw
+    strings made valid Recommendation Matrix rows fail to join silently.
+    """
+    text = unicodedata.normalize("NFKC", clean_text(value)).upper()
+    return re.sub(r"[^A-Z0-9]+", "", text)
 
 
 def slugify(value: str) -> str:
@@ -69,7 +81,7 @@ def build_index(records: List[Dict[str, Any]], key: str) -> Dict[str, Dict[str, 
     index = {}
 
     for record in records:
-        value = clean_text(record.get(key))
+        value = normalise_lookup_key(record.get(key))
         if value:
             index[value] = record
 
@@ -160,6 +172,23 @@ def build_rule_chunk(rule: Dict[str, Any], threshold: Optional[Dict[str, Any]], 
     stage = clean_text(record_get(rule, "stage"))
     attribution = clean_text(record_get(rule, "attribution"))
     pattern = clean_text(record_get(rule, "pattern"))
+    recommendation_en = clean_text(record_get(rec or {}, "recommendation_en"))
+    recommendation_bm = clean_text(record_get(rec or {}, "recommendation_bm"))
+    urgency = clean_text(record_get(rec or {}, "urgency"))
+    target_metric = clean_text(record_get(rec or {}, "target_metric"))
+
+    if not rec:
+        recommendation_join_error = (
+            f"No Recommendation Matrix row matched Rec_Key {rec_key!r}."
+            if rec_key
+            else "Rules Master row has no Rec_Key_to_Sheet_7 value."
+        )
+    elif not recommendation_en:
+        recommendation_join_error = (
+            f"Recommendation Matrix row {rec_key!r} matched, but Recommendation_EN is empty."
+        )
+    else:
+        recommendation_join_error = ""
 
     text = build_rule_text(rule, threshold, rec)
 
@@ -204,10 +233,12 @@ def build_rule_chunk(rule: Dict[str, Any], threshold: Optional[Dict[str, Any]], 
         "score_crit": record_get(rule, "score_crit"),
         "cap": record_get(rule, "cap"),
 
-        "recommendation_en": clean_text(record_get(rec or {}, "recommendation_en")),
-        "recommendation_bm": clean_text(record_get(rec or {}, "recommendation_bm")),
-        "urgency": clean_text(record_get(rec or {}, "urgency")),
-        "target_metric": clean_text(record_get(rec or {}, "target_metric")),
+        "recommendation_en": recommendation_en,
+        "recommendation_bm": recommendation_bm,
+        "urgency": urgency,
+        "target_metric": target_metric,
+        "recommendation_joined": bool(rec),
+        "recommendation_join_error": recommendation_join_error,
 
         "text": text,
         "search_text": search_text,
@@ -305,7 +336,7 @@ def build_formula_reference_chunk(parsed: Dict[str, Any]) -> Dict[str, Any]:
     text_parts = [
         "RCA V4 Scoring Formula Reference",
         "Cycle score = S1_score*0.20 + S2_score*0.30 + S3_score*0.50.",
-        "Full-cycle min-max normalisation is used before stage slicing.",
+        "Full-cycle min-max normalization is used before stage slicing.",
         "MAE and RMSE are combined with 50/50 weight.",
         "Exponential score uses k=2.2.",
         "Exhaust is safety pass/fail only and does not affect cycle score.",
@@ -350,8 +381,8 @@ def chunk_rca_v4(parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
     for rule in rules:
         rule_id = clean_text(record_get(rule, "rule_id"))
         rec_key = clean_text(record_get(rule, "rec_key_to_sheet_7"))
-        threshold = threshold_by_rule.get(rule_id)
-        rec = rec_by_key.get(rec_key)
+        threshold = threshold_by_rule.get(normalise_lookup_key(rule_id))
+        rec = rec_by_key.get(normalise_lookup_key(rec_key))
 
         chunks.append(build_rule_chunk(rule, threshold, rec, source_file_name))
 
@@ -382,11 +413,24 @@ def chunk_and_save_rca_v4(
         chunk_type = chunk.get("chunk_type", "unknown")
         type_counts[chunk_type] = type_counts.get(chunk_type, 0) + 1
 
+    rule_chunks = [chunk for chunk in chunks if chunk.get("chunk_type") == "rca_rule_joined"]
+    missing_recommendation_rules = [
+        {
+            "rule_id": chunk.get("rule_id"),
+            "rec_key": chunk.get("rec_key"),
+            "reason": chunk.get("recommendation_join_error"),
+        }
+        for chunk in rule_chunks
+        if not clean_text(chunk.get("recommendation_en"))
+    ]
+
     return {
         "input_path": str(input_path),
         "output_path": str(saved_path),
         "total_chunks": len(chunks),
         "chunk_type_counts": type_counts,
+        "rules_with_recommendations": len(rule_chunks) - len(missing_recommendation_rules),
+        "rules_missing_recommendations": missing_recommendation_rules,
         "created_at": now_malaysia_iso(),
     }
 
