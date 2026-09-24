@@ -27,6 +27,11 @@ AUTH_COOKIE_SECURE = _env_bool("AUTH_COOKIE_SECURE", False)
 AUTH_COOKIE_SAMESITE = (os.getenv("AUTH_COOKIE_SAMESITE", "lax").strip().lower() or "lax")
 AUTH_COOKIE_DOMAIN = os.getenv("AUTH_COOKIE_DOMAIN", "").strip() or None
 
+# Temporary fixed-account authentication mode.
+FIXED_AUTH_ENABLED = _env_bool("FIXED_AUTH_ENABLED", False)
+FIXED_ADMIN_EMAIL = os.getenv("FIXED_ADMIN_EMAIL", "").strip().lower()
+FIXED_ADMIN_NAME = os.getenv("FIXED_ADMIN_NAME", "Administrator").strip() or "Administrator"
+FIXED_ADMIN_PASSWORD_HASH = os.getenv("FIXED_ADMIN_PASSWORD_HASH", "").strip()
 
 def require_jwt_secret() -> str:
     if len(AUTH_JWT_SECRET) < 32:

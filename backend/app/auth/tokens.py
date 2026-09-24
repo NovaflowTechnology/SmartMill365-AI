@@ -7,7 +7,7 @@ from typing import Any
 
 import jwt
 
-from app.auth.config import AUTH_ACCESS_TOKEN_MINUTES, AUTH_JWT_ALGORITHM, require_jwt_secret
+from app.auth.config import AUTH_ACCESS_TOKEN_MINUTES, AUTH_SESSION_HOURS, AUTH_JWT_ALGORITHM, require_jwt_secret
 
 
 class AccessTokenError(Exception):
@@ -43,6 +43,75 @@ def decode_access_token(token: str) -> dict[str, Any]:
         raise AccessTokenError("invalid_token", "Authentication token is invalid.")
     return payload
 
+def create_fixed_access_token() -> tuple[str, datetime]:
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=AUTH_ACCESS_TOKEN_MINUTES)
+
+    payload = {
+        "sub": "fixed-admin",
+        "sid": "fixed-admin-session",
+        "ver": 1,
+        "type": "access",
+        "iat": int(now.timestamp()),
+        "exp": int(expires_at.timestamp()),
+    }
+
+    return (
+        jwt.encode(
+            payload,
+            require_jwt_secret(),
+            algorithm=AUTH_JWT_ALGORITHM,
+        ),
+        expires_at,
+    )
+
+
+def create_fixed_refresh_token() -> tuple[str, datetime]:
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=AUTH_SESSION_HOURS)
+
+    payload = {
+        "sub": "fixed-admin",
+        "type": "refresh",
+        "iat": int(now.timestamp()),
+        "exp": int(expires_at.timestamp()),
+    }
+
+    return (
+        jwt.encode(
+            payload,
+            require_jwt_secret(),
+            algorithm=AUTH_JWT_ALGORITHM,
+        ),
+        expires_at,
+    )
+
+
+def decode_fixed_refresh_token(token: str) -> dict[str, Any]:
+    try:
+        payload = jwt.decode(
+            token,
+            require_jwt_secret(),
+            algorithms=[AUTH_JWT_ALGORITHM],
+        )
+    except jwt.ExpiredSignatureError as exc:
+        raise AccessTokenError(
+            "session_expired",
+            "Your session has expired. Please log in again.",
+        ) from exc
+    except jwt.InvalidTokenError as exc:
+        raise AccessTokenError(
+            "invalid_session",
+            "Your session is invalid. Please log in again.",
+        ) from exc
+
+    if payload.get("type") != "refresh" or payload.get("sub") != "fixed-admin":
+        raise AccessTokenError(
+            "invalid_session",
+            "Your session is invalid. Please log in again.",
+        )
+
+    return payload
 
 def generate_refresh_token() -> str:
     return secrets.token_urlsafe(64)

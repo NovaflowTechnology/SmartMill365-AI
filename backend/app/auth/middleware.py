@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from app.auth.config import FIXED_ADMIN_EMAIL, FIXED_ADMIN_NAME, FIXED_AUTH_ENABLED
 from app.auth.database import db_session
 from app.auth.models import RefreshSession, utc_now
 from app.auth.service import ROLE_LEVEL, get_user_by_id
@@ -71,6 +72,27 @@ async def authentication_guard(request: Request, call_next):
         return _json_error(401, exc.code, exc.message)
     except Exception:
         return _json_error(401, "invalid_token", "Authentication token is invalid.")
+
+    if FIXED_AUTH_ENABLED:
+        if payload.get("sub") != "fixed-admin":
+            return _json_error(401, "invalid_user", "Your account is no longer available.")
+
+        request.state.auth_user_id = "fixed-admin"
+        request.state.auth_user = {
+            "id": "fixed-admin",
+            "email": FIXED_ADMIN_EMAIL,
+            "full_name": FIXED_ADMIN_NAME,
+            "role": "admin",
+            "is_active": True,
+            "must_change_password": False,
+        }
+        request.state.auth_session_id = "fixed-admin-session"
+
+        required = _required_role(path, method)
+        if ROLE_LEVEL["admin"] < ROLE_LEVEL.get(required, 99):
+            return _json_error(403, "forbidden", "You do not have permission to perform this action.")
+
+        return await call_next(request)
 
     try:
         with db_session() as db:

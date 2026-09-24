@@ -9,7 +9,20 @@ from app.auth.config import (
     AUTH_COOKIE_SECURE,
     AUTH_REFRESH_COOKIE_NAME,
     AUTH_SESSION_HOURS,
+    FIXED_ADMIN_EMAIL,
+    FIXED_ADMIN_NAME,
+    FIXED_ADMIN_PASSWORD_HASH,
+    FIXED_AUTH_ENABLED,
 )
+
+from app.auth.passwords import verify_password
+from app.auth.tokens import (
+    AccessTokenError,
+    create_fixed_access_token,
+    create_fixed_refresh_token,
+    decode_fixed_refresh_token,
+)
+
 from app.auth.database import db_session
 from app.auth.models import User
 from app.auth.schemas import CreateUserRequest, LoginRequest, SetPasswordRequest, UpdateUserRequest
@@ -78,6 +91,33 @@ def _public_session(payload: dict) -> dict:
         "user": payload["user"],
     }
 
+def _fixed_user() -> dict:
+    return {
+        "id": "fixed-admin",
+        "email": FIXED_ADMIN_EMAIL,
+        "full_name": FIXED_ADMIN_NAME,
+        "role": "admin",
+        "is_active": True,
+        "must_change_password": False,
+        "failed_login_attempts": 0,
+        "locked_until": None,
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
+def _fixed_session_payload() -> dict:
+    access_token, access_expires = create_fixed_access_token()
+    refresh_token, session_expires = create_fixed_refresh_token()
+
+    return {
+        "access_token": access_token,
+        "access_token_expires_at": access_expires.replace(microsecond=0).isoformat(),
+        "session_expires_at": session_expires.replace(microsecond=0).isoformat(),
+        "user": _fixed_user(),
+        "refresh_token": refresh_token,
+        "session_id": "fixed-admin-session",
+    }
 
 def _raise_service_error(exc: AuthServiceError):
     raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message})
@@ -93,6 +133,26 @@ def _current_user(db, request: Request) -> User:
 
 @router.post("/api/auth/login")
 def login(payload: LoginRequest, request: Request, response: Response):
+    if FIXED_AUTH_ENABLED:
+        email = str(payload.email).strip().lower()
+
+        if (
+            not FIXED_ADMIN_EMAIL
+            or not FIXED_ADMIN_PASSWORD_HASH
+            or email != FIXED_ADMIN_EMAIL
+            or not verify_password(FIXED_ADMIN_PASSWORD_HASH, payload.password)
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "invalid_credentials",
+                    "message": "Invalid email or password.",
+                },
+            )
+
+        session_payload = _fixed_session_payload()
+        _set_refresh_cookie(response, session_payload["refresh_token"])
+        return _public_session(session_payload)
     # Authentication failures intentionally update persistent security state
     # (failed_login_attempts, locked_until and the auth audit log).
     # Catch AuthServiceError *inside* db_session() so those intended updates are
@@ -123,6 +183,21 @@ def login(payload: LoginRequest, request: Request, response: Response):
 
 @router.post("/api/auth/refresh")
 def refresh(request: Request, response: Response):
+    if FIXED_AUTH_ENABLED:
+        raw = request.cookies.get(AUTH_REFRESH_COOKIE_NAME, "")
+
+        try:
+            decode_fixed_refresh_token(raw)
+        except AccessTokenError as exc:
+            _clear_refresh_cookie(response)
+            raise HTTPException(
+                status_code=401,
+                detail={"code": exc.code, "message": exc.message},
+            )
+
+        session_payload = _fixed_session_payload()
+        _set_refresh_cookie(response, session_payload["refresh_token"])
+        return _public_session(session_payload)
     raw = request.cookies.get(AUTH_REFRESH_COOKIE_NAME, "")
     try:
         with db_session() as db:
@@ -141,6 +216,9 @@ def refresh(request: Request, response: Response):
 
 @router.post("/api/auth/logout")
 def logout(request: Request, response: Response):
+    if FIXED_AUTH_ENABLED:
+        _clear_refresh_cookie(response)
+        return {"message": "Signed out successfully."}
     with db_session() as db:
         session_id = getattr(request.state, "auth_session_id", None)
         user = _current_user(db, request)
@@ -160,6 +238,8 @@ def logout(request: Request, response: Response):
 
 @router.get("/api/auth/me")
 def me(request: Request):
+    if FIXED_AUTH_ENABLED:
+        return {"user": _fixed_user()}
     with db_session() as db:
         user = _current_user(db, request)
         return {"user": serialize_user(user)}
