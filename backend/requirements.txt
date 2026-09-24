@@ -42,7 +42,7 @@ Pygments==2.20.0
 PyMuPDF==1.27.2.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
-pywin32==312
+pywin32==312; platform_system == "Windows"
 PyYAML==6.0.3
 qdrant-client==1.18.0
 reactivex==4.1.0
